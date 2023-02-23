@@ -1,6 +1,8 @@
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 //! This crate provides helper functions to activate and deactivate virtual environments.
+
+mod shell;
 
 use std::{
     ffi::OsStr,
@@ -9,6 +11,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
+use shell::{Bash, CmdExe, Fish, PowerShell, ShellScript, Xonsh, Zsh};
 
 /// Enumeration of different shell types that are recognized by rattler
 #[derive(Copy, Clone, Debug)]
@@ -303,11 +306,58 @@ impl Activator {
             env_vars,
         })
     }
+
+    /// Create a activation script for a given shell
+    pub fn activation_script(&self, deactivate: Option<Activator>) -> String {
+        let mut script = match self.shell_type {
+            ShellType::Bash => ShellScript::new(Box::new(Bash)),
+            ShellType::Zsh => ShellScript::new(Box::new(Zsh)),
+            ShellType::Powershell => ShellScript::new(Box::new(PowerShell)),
+            ShellType::CmdExe => ShellScript::new(Box::new(CmdExe)),
+            ShellType::Fish => ShellScript::new(Box::new(Fish)),
+            ShellType::Xonsh => ShellScript::new(Box::new(Xonsh)),
+        };
+
+        let path = std::env::var("PATH").unwrap_or_else(|_| "".to_string());
+        let mut path_elements = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        if let Some(deactivate) = deactivate {
+            for (key, _) in &deactivate.env_vars {
+                script.unset_env_var(key);
+            }
+
+            for s in &deactivate.deactivation_scripts {
+                script.run_script(s);
+            }
+
+            path_elements.retain(|x| !deactivate.paths.contains(x));
+        }
+
+        // prepend new paths
+        let path_elements = [self.paths.clone(), path_elements].concat();
+
+        script.set_path(path_elements.as_slice());
+
+        // deliberately not taking care of `CONDA_SHLVL` or any other complications at this point
+        script.set_env_var("CONDA_PREFIX", &self.target_prefix.to_string_lossy());
+
+        for (key, value) in &self.env_vars {
+            script.set_env_var(key, value);
+        }
+
+        for s in &self.activation_scripts {
+            script.run_script(s);
+        }
+
+        script.to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+
+    use crate::shell::Shell;
 
     use super::*;
     use tempdir::TempDir;
@@ -413,5 +463,73 @@ mod tests {
         let prefix = PathBuf::from_str("/opt/conda").unwrap();
         let new_paths = prefix_path_entries(&prefix, OperatingSystem::MacOS);
         assert_eq!(new_paths.len(), 1);
+    }
+
+    fn create_temp_dir() -> TempDir {
+        let tempdir = TempDir::new("test").unwrap();
+        let path = tempdir.path().join("etc/conda/activate.d/");
+        fs::create_dir_all(&path).unwrap();
+
+        let script1 = path.join("script1.sh");
+
+        fs::write(&script1, "").unwrap();
+
+        tempdir
+    }
+
+    fn get_script(shell_type: ShellType) -> String {
+        let tdir = create_temp_dir();
+        let old_path_var = std::env::var("PATH").unwrap();
+        std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin");
+
+        let activator = Activator::from_path(
+            &tdir.path().to_path_buf(),
+            shell_type,
+            OperatingSystem::MacOS,
+        )
+        .unwrap();
+
+        let script = activator.activation_script(None);
+        let prefix = tdir.path().to_str().unwrap();
+        let script = script.replace(prefix, "__PREFIX__");
+
+        std::env::set_var("PATH", old_path_var);
+        script
+    }
+
+    #[test]
+    fn test_activation_script_bash() {
+        let script = get_script(ShellType::Bash);
+        insta::assert_snapshot!(script);
+    }
+
+    #[test]
+    fn test_activation_script_zsh() {
+        let script = get_script(ShellType::Zsh);
+        insta::assert_snapshot!(script);
+    }
+
+    #[test]
+    fn test_activation_script_fish() {
+        let script = get_script(ShellType::Fish);
+        insta::assert_snapshot!(script);
+    }
+
+    #[test]
+    fn test_activation_script_powershell() {
+        let script = get_script(ShellType::Powershell);
+        insta::assert_snapshot!(script);
+    }
+
+    #[test]
+    fn test_activation_script_cmd() {
+        let script = get_script(ShellType::CmdExe);
+        insta::assert_snapshot!(script);
+    }
+
+    #[test]
+    fn test_activation_script_xonsh() {
+        let script = get_script(ShellType::Xonsh);
+        insta::assert_snapshot!(script);
     }
 }

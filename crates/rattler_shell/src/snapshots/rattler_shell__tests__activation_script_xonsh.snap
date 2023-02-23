@@ -1,0 +1,6 @@
+---
+source: crates/rattler_shell/src/lib.rs
+expression: script
+---
+setx PATH "__PREFIX__/bin;/usr/bin;/bin;/usr/sbin;/sbin;/usr/local/bin"
+setx CONDA_PREFIX "__PREFIX__"
