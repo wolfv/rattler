@@ -1,14 +1,38 @@
+//! This module contains the [`Shell`] trait and implementations for various shells.
+
 use std::{
     ffi::OsStr,
     fmt::Write,
     path::{Path, PathBuf},
 };
 
+/// A trait for generating shell scripts.
+/// The trait is implemented for each shell individually.
+///
+/// # Example
+///
+/// ```
+/// use std::path::PathBuf;
+/// use rattler_shell::shell::Bash;
+/// use rattler_shell::shell::Shell;
+///
+/// let mut script = String::new();
+/// let shell = Bash;
+/// shell.set_env_var(&mut script, "FOO", "bar").unwrap();
+///
+/// assert_eq!(script, "export FOO=\"bar\"\n");
+/// ```
 pub trait Shell {
+    /// Set an env var by `export`-ing it.
     fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result;
+
+    /// Unset an env var by `unset`-ing it.
     fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result;
-    fn extension(&self) -> &OsStr;
+
+    /// Run a script in the current shell.
     fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result;
+
+    /// Set the PATH variable to the given paths.
     fn set_path(&self, f: &mut impl Write, paths: &[PathBuf]) -> std::fmt::Result {
         let path = paths
             .iter()
@@ -17,8 +41,13 @@ pub trait Shell {
             .join(":");
         self.set_env_var(f, "PATH", &path)
     }
+
+    /// The extension that shell scripts for this interpreter usually use.
+    fn extension(&self) -> &OsStr;
 }
 
+/// A [`Shell`] implementation for the Bash shell.
+#[derive(Debug, Clone, Copy)]
 pub struct Bash;
 
 impl Shell for Bash {
@@ -39,6 +68,8 @@ impl Shell for Bash {
     }
 }
 
+/// A [`Shell`] implementation for the Zsh shell.
+#[derive(Debug, Clone, Copy)]
 pub struct Zsh;
 
 impl Shell for Zsh {
@@ -59,6 +90,8 @@ impl Shell for Zsh {
     }
 }
 
+/// A [`Shell`] implementation for the Xonsh shell.
+#[derive(Debug, Clone, Copy)]
 pub struct Xonsh;
 
 impl Shell for Xonsh {
@@ -79,6 +112,8 @@ impl Shell for Xonsh {
     }
 }
 
+/// A [`Shell`] implementation for the cmd.exe shell.
+#[derive(Debug, Clone, Copy)]
 pub struct CmdExe;
 
 impl Shell for CmdExe {
@@ -99,6 +134,8 @@ impl Shell for CmdExe {
     }
 }
 
+/// A [`Shell`] implementation for PowerShell.
+#[derive(Debug, Clone, Copy)]
 pub struct PowerShell;
 
 impl Shell for PowerShell {
@@ -119,6 +156,8 @@ impl Shell for PowerShell {
     }
 }
 
+/// A [`Shell`] implementation for the Fish shell.
+#[derive(Debug, Clone, Copy)]
 pub struct Fish;
 
 impl Shell for Fish {
@@ -139,12 +178,16 @@ impl Shell for Fish {
     }
 }
 
+/// A helper struct for generating shell scripts.
 pub struct ShellScript<T: Shell> {
+    /// The shell class to generate the script for.
     shell: T,
+    /// The contents of the script.
     pub contents: String,
 }
 
 impl<T: Shell> ShellScript<T> {
+    /// Create a new [`ShellScript`] for the given shell.
     pub fn new(shell: T) -> Self {
         Self {
             shell,
@@ -152,6 +195,7 @@ impl<T: Shell> ShellScript<T> {
         }
     }
 
+    /// Export an environment variable.
     pub fn set_env_var(&mut self, env_var: &str, value: &str) -> &mut Self {
         self.shell
             .set_env_var(&mut self.contents, env_var, value)
@@ -159,6 +203,7 @@ impl<T: Shell> ShellScript<T> {
         self
     }
 
+    /// Unset an environment variable.
     pub fn unset_env_var(&mut self, env_var: &str) -> &mut Self {
         self.shell
             .unset_env_var(&mut self.contents, env_var)
@@ -166,11 +211,13 @@ impl<T: Shell> ShellScript<T> {
         self
     }
 
+    /// Set the PATH environment variable to the given paths.
     pub fn set_path(&mut self, paths: &[PathBuf]) -> &mut Self {
         self.shell.set_path(&mut self.contents, paths).unwrap();
         self
     }
 
+    /// Run a script in the generated shell script.
     pub fn run_script(&mut self, path: &Path) -> &mut Self {
         self.shell.run_script(&mut self.contents, path).unwrap();
         self

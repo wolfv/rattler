@@ -1,4 +1,4 @@
-// #![deny(missing_docs)]
+#![deny(missing_docs)]
 
 //! This crate provides helper functions to activate and deactivate virtual environments.
 
@@ -25,6 +25,25 @@ pub enum OperatingSystem {
     Linux,
 }
 
+/// A struct that contains the values of the environment variables that are relevant for the activation process.
+/// The values are stored as strings. Currently, only the `PATH` and `CONDA_PREFIX` environment variables are used.
+pub struct ActivationVariables {
+    /// The value of the `CONDA_PREFIX` environment variable that contains the activated conda prefix path
+    pub conda_prefix: Option<String>,
+    /// The value of the `PATH` environment variable that contains the paths to the executables
+    pub path: String,
+}
+
+impl ActivationVariables {
+    /// Create a new `ActivationVariables` struct from the environment variables.
+    pub fn from_env() -> Self {
+        Self {
+            conda_prefix: std::env::var("CONDA_PREFIX").ok(),
+            path: std::env::var("PATH").unwrap(),
+        }
+    }
+}
+
 /// A struct that holds values for the activation and deactivation
 /// process of an environment, e.g. activation scripts to execute or environment variables to set.
 pub struct Activator<T: Shell> {
@@ -45,6 +64,9 @@ pub struct Activator<T: Shell> {
 
     /// A list of environment variables to set when activating the environment
     pub env_vars: IndexMap<String, String>,
+
+    /// The operating system for which to generate the Activator
+    pub operating_system: OperatingSystem,
 }
 
 /// Collect all script files that match a certain shell type from a given path.
@@ -232,7 +254,7 @@ fn prefix_path_entries(prefix: &Path, operating_system: OperatingSystem) -> Vec<
     }
 }
 
-impl<T: Shell> Activator<T> {
+impl<T: Shell + Clone> Activator<T> {
     /// Create a new activator for the given conda environment.
     ///
     /// # Arguments
@@ -277,15 +299,25 @@ impl<T: Shell> Activator<T> {
             activation_scripts,
             deactivation_scripts,
             env_vars,
+            operating_system,
         })
     }
 
     /// Create a activation script for a given shell
-    pub fn activation_script(&self, deactivate: Option<Self>) -> Result<String, ActivationError> {
-        let path = std::env::var("PATH").unwrap_or_else(|_| "".to_string());
-        let mut path_elements = std::env::split_paths(&path).collect::<Vec<_>>();
+    pub fn activation_script(
+        &self,
+        variables: ActivationVariables,
+    ) -> Result<String, ActivationError> {
         let mut out = String::new();
-        if let Some(deactivate) = deactivate {
+
+        let mut path_elements = std::env::split_paths(&variables.path).collect::<Vec<_>>();
+        if let Some(conda_prefix) = variables.conda_prefix {
+            let deactivate = Activator::from_path(
+                Path::new(&conda_prefix),
+                self.shell_type.clone(),
+                self.operating_system,
+            )?;
+
             for (key, _) in &deactivate.env_vars {
                 self.shell_type
                     .unset_env_var(&mut out, key)
@@ -336,7 +368,6 @@ impl<T: Shell> Activator<T> {
 #[cfg(test)]
 mod tests {
     use crate::shell;
-    use serial_test::serial;
     use std::str::FromStr;
 
     use super::*;
@@ -457,10 +488,11 @@ mod tests {
         tempdir
     }
 
-    fn get_script<T: Shell>(shell_type: T) -> String {
+    fn get_script<T: Shell>(shell_type: T) -> String
+    where
+        T: Clone,
+    {
         let tdir = create_temp_dir();
-        let old_path_var = std::env::var("PATH").unwrap();
-        std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin");
 
         let activator = Activator::from_path(
             &tdir.path().to_path_buf(),
@@ -469,50 +501,46 @@ mod tests {
         )
         .unwrap();
 
-        let script = activator.activation_script(None);
+        let script = activator.activation_script(ActivationVariables {
+            conda_prefix: None,
+            path: "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin".to_string(),
+        });
         let prefix = tdir.path().to_str().unwrap();
         let script = script.unwrap().replace(prefix, "__PREFIX__");
 
-        std::env::set_var("PATH", old_path_var);
         script
     }
 
-    #[serial]
     #[test]
     fn test_activation_script_bash() {
         let script = get_script(shell::Bash);
         insta::assert_snapshot!(script);
     }
 
-    #[serial]
     #[test]
     fn test_activation_script_zsh() {
         let script = get_script(shell::Zsh);
         insta::assert_snapshot!(script);
     }
 
-    #[serial]
     #[test]
     fn test_activation_script_fish() {
         let script = get_script(shell::Fish);
         insta::assert_snapshot!(script);
     }
 
-    #[serial]
     #[test]
     fn test_activation_script_powershell() {
         let script = get_script(shell::PowerShell);
         insta::assert_snapshot!(script);
     }
 
-    #[serial]
     #[test]
     fn test_activation_script_cmd() {
         let script = get_script(shell::CmdExe);
         insta::assert_snapshot!(script);
     }
 
-    #[serial]
     #[test]
     fn test_activation_script_xonsh() {
         let script = get_script(shell::Xonsh);
