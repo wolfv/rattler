@@ -15,6 +15,7 @@ indexmap = "1.9.2"
 serde_json = { version = "1.0.93", features = ["preserve_order"]}
 tracing = "0.1.29"
 enum_dispatch = "0.3.11"
+tempdir = "0.3.7"
 
 [dev-dependencies]
 tempdir = "0.3.7"
