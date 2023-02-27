@@ -512,36 +512,42 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_activation_script_bash() {
         let script = get_script(shell::Bash);
         insta::assert_snapshot!(script);
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_activation_script_zsh() {
         let script = get_script(shell::Zsh);
         insta::assert_snapshot!(script);
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_activation_script_fish() {
         let script = get_script(shell::Fish);
         insta::assert_snapshot!(script);
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_activation_script_powershell() {
         let script = get_script(shell::PowerShell);
         insta::assert_snapshot!(script);
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_activation_script_cmd() {
         let script = get_script(shell::CmdExe);
         insta::assert_snapshot!(script);
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_activation_script_xonsh() {
         let script = get_script(shell::Xonsh);
         insta::assert_snapshot!(script);

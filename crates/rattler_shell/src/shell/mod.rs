@@ -34,16 +34,39 @@ pub trait Shell {
 
     /// Set the PATH variable to the given paths.
     fn set_path(&self, f: &mut impl Write, paths: &[PathBuf]) -> std::fmt::Result {
-        let path = paths
-            .iter()
-            .map(|path| path.to_str().unwrap())
-            .collect::<Vec<&str>>()
-            .join(":");
-        self.set_env_var(f, "PATH", &path)
+        let path = std::env::join_paths(paths).unwrap();
+        self.set_env_var(f, "PATH", path.to_owned().to_str().unwrap())
     }
 
     /// The extension that shell scripts for this interpreter usually use.
     fn extension(&self) -> &OsStr;
+}
+
+/// Convert a native path to a Unix style path usign cygpath.
+fn native_path_to_unix(path: &str) -> Result<String, std::io::Error> {
+    // call cygpath on Windows to convert paths to Unix style
+    let output = std::process::Command::new("cygpath")
+        .arg("--unix")
+        .arg("--path")
+        .arg(path)
+        .output()
+        .unwrap();
+
+    if output.status.success() {
+        return Ok(String::from_utf8(output.stdout)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to convert path to Unix style",
+                )
+            })?
+            .trim()
+            .to_string());
+    }
+    return Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "Failed to convert path to Unix style",
+    ));
 }
 
 /// A [`Shell`] implementation for the Bash shell.
@@ -65,6 +88,18 @@ impl Shell for Bash {
 
     fn extension(&self) -> &OsStr {
         OsStr::new("sh")
+    }
+
+    fn set_path(&self, f: &mut impl Write, paths: &[PathBuf]) -> std::fmt::Result {
+        let path = std::env::join_paths(paths).unwrap();
+
+        // check if we are on Windows, and if yes, convert native path to unix for (Git) Bash
+        if cfg!(windows) {
+            let path = native_path_to_unix(path.to_str().unwrap()).unwrap();
+            return self.set_env_var(f, "PATH", &path);
+        }
+
+        self.set_env_var(f, "PATH", path.to_owned().to_str().unwrap())
     }
 }
 
