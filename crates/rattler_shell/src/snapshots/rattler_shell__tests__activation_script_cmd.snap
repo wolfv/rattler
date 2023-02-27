@@ -2,5 +2,6 @@
 source: crates/rattler_shell/src/lib.rs
 expression: script
 ---
-set "PATH=__PREFIX__/bin;/usr/bin;/bin;/usr/sbin;/sbin;/usr/local/bin"
-set "CONDA_PREFIX=__PREFIX__"
+@SET "PATH=__PREFIX__/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+@SET "CONDA_PREFIX=__PREFIX__"
+

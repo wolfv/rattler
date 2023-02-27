@@ -2,47 +2,15 @@
 
 //! This crate provides helper functions to activate and deactivate virtual environments.
 
-mod shell;
+pub mod shell;
 
 use std::{
-    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
 
 use indexmap::IndexMap;
-use shell::{Bash, CmdExe, Fish, PowerShell, ShellScript, Xonsh, Zsh};
-
-/// Enumeration of different shell types that are recognized by rattler
-#[derive(Copy, Clone, Debug)]
-pub enum ShellType {
-    /// The `bash` shell
-    Bash,
-    /// The `zsh` shell
-    Zsh,
-    /// The `fish` shell
-    Fish,
-    /// The `xonsh` shell
-    Xonsh,
-    /// `powershell` or `pwsh`
-    Powershell,
-    /// The Windows Command Prompt (cmd.exe)
-    CmdExe,
-}
-
-impl ShellType {
-    /// Returns the file extension for this shell type.
-    fn suffix(&self) -> &'static OsStr {
-        match self {
-            ShellType::Bash => OsStr::new("sh"),
-            ShellType::Zsh => OsStr::new("zsh"),
-            ShellType::Xonsh => OsStr::new("xsh"),
-            ShellType::Fish => OsStr::new("fish"),
-            ShellType::Powershell => OsStr::new("ps1"),
-            ShellType::CmdExe => OsStr::new("bat"),
-        }
-    }
-}
+use shell::Shell;
 
 /// An enumeration of the different operating systems that are supported by rattler
 #[derive(Copy, Clone, Debug)]
@@ -59,12 +27,12 @@ pub enum OperatingSystem {
 
 /// A struct that holds values for the activation and deactivation
 /// process of an environment, e.g. activation scripts to execute or environment variables to set.
-pub struct Activator {
+pub struct Activator<T: Shell> {
     /// The path to the root of the conda environment
     pub target_prefix: PathBuf,
 
     /// The type of shell that is being activated
-    pub shell_type: ShellType,
+    pub shell_type: T,
 
     /// Paths that need to be added to the PATH environment variable
     pub paths: Vec<PathBuf>,
@@ -96,7 +64,7 @@ pub struct Activator {
 /// # Errors
 ///
 /// If the path is not a directory, an error is returned.
-fn collect_scripts(path: &Path, shell_type: ShellType) -> Result<Vec<PathBuf>, std::io::Error> {
+fn collect_scripts<T: Shell>(path: &Path, shell_type: &T) -> Result<Vec<PathBuf>, std::io::Error> {
     // Check if path exists
     if !path.exists() {
         return Ok(vec![]);
@@ -108,7 +76,7 @@ fn collect_scripts(path: &Path, shell_type: ShellType) -> Result<Vec<PathBuf>, s
         .into_iter()
         .filter_map(|r| r.ok())
         .map(|r| r.path())
-        .filter(|path| path.is_file() && path.extension() == Some(shell_type.suffix()))
+        .filter(|path| path.is_file() && path.extension() == Some(shell_type.extension()))
         .collect::<Vec<_>>();
 
     scripts.sort();
@@ -140,6 +108,10 @@ pub enum ActivationError {
         /// The path to the file that contains the malformed JSON
         file: PathBuf,
     },
+
+    /// An error that occurs when writing the activation script to a file fails
+    #[error("Failed to write activation script to file {0}")]
+    FailedToWriteActivationScript(#[source] std::fmt::Error),
 }
 
 /// Collect all environment variables that are set in a conda environment.
@@ -260,7 +232,7 @@ fn prefix_path_entries(prefix: &Path, operating_system: OperatingSystem) -> Vec<
     }
 }
 
-impl Activator {
+impl<T: Shell> Activator<T> {
     /// Create a new activator for the given conda environment.
     ///
     /// # Arguments
@@ -276,22 +248,23 @@ impl Activator {
     /// # Examples
     ///
     /// ```
-    /// use rattler_shell_helpers::{Activator, OperatingSystem, ShellType};
+    /// use rattler_shell::{Activator, OperatingSystem};
+    /// use rattler_shell::shell;
     /// use std::path::PathBuf;
     ///
-    /// let activator = Activator::from_path(&PathBuf::from("tests/fixtures/env_vars"), ShellType::Bash, OperatingSystem::MacOS).unwrap();
+    /// let activator = Activator::from_path(&PathBuf::from("tests/fixtures/env_vars"), shell::Bash, OperatingSystem::MacOS).unwrap();
     /// assert_eq!(activator.paths.len(), 1);
     /// assert_eq!(activator.paths[0], PathBuf::from("tests/fixtures/env_vars/bin"));
     /// ```
     pub fn from_path(
         path: &Path,
-        shell_type: ShellType,
+        shell_type: T,
         operating_system: OperatingSystem,
-    ) -> Result<Activator, ActivationError> {
-        let activation_scripts = collect_scripts(&path.join("etc/conda/activate.d"), shell_type)?;
+    ) -> Result<Activator<T>, ActivationError> {
+        let activation_scripts = collect_scripts(&path.join("etc/conda/activate.d"), &shell_type)?;
 
         let deactivation_scripts =
-            collect_scripts(&path.join("etc/conda/deactivate.d"), shell_type)?;
+            collect_scripts(&path.join("etc/conda/deactivate.d"), &shell_type)?;
 
         let env_vars = collect_env_vars(path)?;
 
@@ -308,26 +281,21 @@ impl Activator {
     }
 
     /// Create a activation script for a given shell
-    pub fn activation_script(&self, deactivate: Option<Activator>) -> String {
-        let mut script = match self.shell_type {
-            ShellType::Bash => ShellScript::new(Box::new(Bash)),
-            ShellType::Zsh => ShellScript::new(Box::new(Zsh)),
-            ShellType::Powershell => ShellScript::new(Box::new(PowerShell)),
-            ShellType::CmdExe => ShellScript::new(Box::new(CmdExe)),
-            ShellType::Fish => ShellScript::new(Box::new(Fish)),
-            ShellType::Xonsh => ShellScript::new(Box::new(Xonsh)),
-        };
-
+    pub fn activation_script(&self, deactivate: Option<Self>) -> Result<String, ActivationError> {
         let path = std::env::var("PATH").unwrap_or_else(|_| "".to_string());
         let mut path_elements = std::env::split_paths(&path).collect::<Vec<_>>();
-
+        let mut out = String::new();
         if let Some(deactivate) = deactivate {
             for (key, _) in &deactivate.env_vars {
-                script.unset_env_var(key);
+                self.shell_type
+                    .unset_env_var(&mut out, key)
+                    .map_err(ActivationError::FailedToWriteActivationScript)?;
             }
 
-            for s in &deactivate.deactivation_scripts {
-                script.run_script(s);
+            for deactivation_script in &deactivate.deactivation_scripts {
+                self.shell_type
+                    .run_script(&mut out, deactivation_script)
+                    .map_err(ActivationError::FailedToWriteActivationScript)?;
             }
 
             path_elements.retain(|x| !deactivate.paths.contains(x));
@@ -336,28 +304,40 @@ impl Activator {
         // prepend new paths
         let path_elements = [self.paths.clone(), path_elements].concat();
 
-        script.set_path(path_elements.as_slice());
+        self.shell_type
+            .set_path(&mut out, path_elements.as_slice())
+            .map_err(ActivationError::FailedToWriteActivationScript)?;
 
         // deliberately not taking care of `CONDA_SHLVL` or any other complications at this point
-        script.set_env_var("CONDA_PREFIX", &self.target_prefix.to_string_lossy());
+        self.shell_type
+            .set_env_var(
+                &mut out,
+                "CONDA_PREFIX",
+                &self.target_prefix.to_string_lossy(),
+            )
+            .map_err(ActivationError::FailedToWriteActivationScript)?;
 
         for (key, value) in &self.env_vars {
-            script.set_env_var(key, value);
+            self.shell_type
+                .set_env_var(&mut out, key, value)
+                .map_err(ActivationError::FailedToWriteActivationScript)?;
         }
 
-        for s in &self.activation_scripts {
-            script.run_script(s);
+        for activation_script in &self.activation_scripts {
+            self.shell_type
+                .run_script(&mut out, activation_script)
+                .map_err(ActivationError::FailedToWriteActivationScript)?;
         }
 
-        script.to_string()
+        Ok(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::shell;
+    use serial_test::serial;
     use std::str::FromStr;
-
-    use crate::shell::Shell;
 
     use super::*;
     use tempdir::TempDir;
@@ -377,9 +357,9 @@ mod tests {
         fs::write(&script2, "").unwrap();
         fs::write(&script3, "").unwrap();
 
-        let shell_type = ShellType::Bash;
+        let shell_type = shell::Bash;
 
-        let scripts = collect_scripts(&path, shell_type).unwrap();
+        let scripts = collect_scripts(&path, &shell_type).unwrap();
         assert_eq!(scripts.len(), 3);
         assert_eq!(scripts[0], script2);
         assert_eq!(scripts[1], script1);
@@ -477,7 +457,7 @@ mod tests {
         tempdir
     }
 
-    fn get_script(shell_type: ShellType) -> String {
+    fn get_script<T: Shell>(shell_type: T) -> String {
         let tdir = create_temp_dir();
         let old_path_var = std::env::var("PATH").unwrap();
         std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin");
@@ -491,45 +471,51 @@ mod tests {
 
         let script = activator.activation_script(None);
         let prefix = tdir.path().to_str().unwrap();
-        let script = script.replace(prefix, "__PREFIX__");
+        let script = script.unwrap().replace(prefix, "__PREFIX__");
 
         std::env::set_var("PATH", old_path_var);
         script
     }
 
+    #[serial]
     #[test]
     fn test_activation_script_bash() {
-        let script = get_script(ShellType::Bash);
+        let script = get_script(shell::Bash);
         insta::assert_snapshot!(script);
     }
 
+    #[serial]
     #[test]
     fn test_activation_script_zsh() {
-        let script = get_script(ShellType::Zsh);
+        let script = get_script(shell::Zsh);
         insta::assert_snapshot!(script);
     }
 
+    #[serial]
     #[test]
     fn test_activation_script_fish() {
-        let script = get_script(ShellType::Fish);
+        let script = get_script(shell::Fish);
         insta::assert_snapshot!(script);
     }
 
+    #[serial]
     #[test]
     fn test_activation_script_powershell() {
-        let script = get_script(ShellType::Powershell);
+        let script = get_script(shell::PowerShell);
         insta::assert_snapshot!(script);
     }
 
+    #[serial]
     #[test]
     fn test_activation_script_cmd() {
-        let script = get_script(ShellType::CmdExe);
+        let script = get_script(shell::CmdExe);
         insta::assert_snapshot!(script);
     }
 
+    #[serial]
     #[test]
     fn test_activation_script_xonsh() {
-        let script = get_script(ShellType::Xonsh);
+        let script = get_script(shell::Xonsh);
         insta::assert_snapshot!(script);
     }
 }

@@ -1,227 +1,179 @@
 use std::{
-    fmt::{self, Display, Formatter},
+    ffi::OsStr,
+    fmt::Write,
     path::{Path, PathBuf},
 };
 
 pub trait Shell {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String;
-    fn unset_env_var(&self, env_var: &str) -> String;
-    fn extension(&self) -> String;
-    fn run_script(&self, path: &Path) -> String;
-    fn set_path(&self, paths: &[PathBuf]) -> String;
-}
-
-pub struct Bash;
-
-impl Shell for Bash {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String {
-        format!("export {}=\"{}\"", env_var, value)
-    }
-
-    fn unset_env_var(&self, env_var: &str) -> String {
-        format!("unset {}", env_var)
-    }
-
-    fn run_script(&self, path: &Path) -> String {
-        format!(". \"{}\"", path.to_string_lossy())
-    }
-
-    fn extension(&self) -> String {
-        "sh".to_string()
-    }
-
-    fn set_path(&self, paths: &[PathBuf]) -> String {
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result;
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result;
+    fn extension(&self) -> &OsStr;
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result;
+    fn set_path(&self, f: &mut impl Write, paths: &[PathBuf]) -> std::fmt::Result {
         let path = paths
             .iter()
             .map(|path| path.to_str().unwrap())
             .collect::<Vec<&str>>()
             .join(":");
-        self.set_env_var("PATH", &path)
+        self.set_env_var(f, "PATH", &path)
+    }
+}
+
+pub struct Bash;
+
+impl Shell for Bash {
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result {
+        writeln!(f, "export {}=\"{}\"", env_var, value)
+    }
+
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result {
+        writeln!(f, "unset {}", env_var)
+    }
+
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result {
+        writeln!(f, ". \"{}\"", path.to_string_lossy())
+    }
+
+    fn extension(&self) -> &OsStr {
+        OsStr::new("sh")
     }
 }
 
 pub struct Zsh;
 
 impl Shell for Zsh {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String {
-        format!("export {}=\"{}\"", env_var, value)
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result {
+        writeln!(f, "export {}=\"{}\"", env_var, value)
     }
 
-    fn unset_env_var(&self, env_var: &str) -> String {
-        format!("unset {}", env_var)
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result {
+        writeln!(f, "unset {}", env_var)
     }
 
-    fn run_script(&self, path: &Path) -> String {
-        format!(". \"{}\"", path.to_string_lossy())
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result {
+        writeln!(f, ". \"{}\"", path.to_string_lossy())
     }
 
-    fn extension(&self) -> String {
-        "zsh".to_string()
-    }
-
-    fn set_path(&self, paths: &[PathBuf]) -> String {
-        let path = paths
-            .iter()
-            .map(|path| path.to_str().unwrap())
-            .collect::<Vec<&str>>()
-            .join(":");
-        self.set_env_var("PATH", &path)
-    }
-}
-
-pub struct Fish;
-
-impl Shell for Fish {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String {
-        format!("set -gx {} \"{}\"", env_var, value)
-    }
-
-    fn unset_env_var(&self, env_var: &str) -> String {
-        format!("set -e {}", env_var)
-    }
-
-    fn run_script(&self, path: &Path) -> String {
-        format!(". \"{}\"", path.to_string_lossy())
-    }
-
-    fn extension(&self) -> String {
-        "fish".to_string()
-    }
-
-    fn set_path(&self, paths: &[PathBuf]) -> String {
-        let path = paths
-            .iter()
-            .map(|path| path.to_str().unwrap())
-            .collect::<Vec<&str>>()
-            .join(":");
-        self.set_env_var("PATH", &path)
-    }
-}
-
-pub struct CmdExe;
-
-impl Shell for CmdExe {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String {
-        format!("set \"{}={}\"", env_var, value)
-    }
-
-    fn unset_env_var(&self, env_var: &str) -> String {
-        format!("set \"{}=\"", env_var)
-    }
-
-    fn run_script(&self, path: &Path) -> String {
-        format!(". {}", path.to_string_lossy())
-    }
-
-    fn extension(&self) -> String {
-        "bat".to_string()
-    }
-
-    fn set_path(&self, paths: &[PathBuf]) -> String {
-        let path = paths
-            .iter()
-            .map(|path| path.to_str().unwrap())
-            .collect::<Vec<&str>>()
-            .join(";");
-        self.set_env_var("PATH", &path)
-    }
-}
-
-pub struct PowerShell;
-
-impl Shell for PowerShell {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String {
-        format!("$env:{} = \"{}\"", env_var, value)
-    }
-
-    fn unset_env_var(&self, env_var: &str) -> String {
-        format!("Remove-Item Env:{}", env_var)
-    }
-
-    fn run_script(&self, path: &Path) -> String {
-        format!(". \"{}\"", path.to_string_lossy())
-    }
-
-    fn extension(&self) -> String {
-        "ps1".to_string()
-    }
-
-    fn set_path(&self, paths: &[PathBuf]) -> String {
-        let path = paths
-            .iter()
-            .map(|path| path.to_str().unwrap())
-            .collect::<Vec<&str>>()
-            .join(";");
-        self.set_env_var("PATH", &path)
+    fn extension(&self) -> &OsStr {
+        OsStr::new("zsh")
     }
 }
 
 pub struct Xonsh;
 
 impl Shell for Xonsh {
-    fn set_env_var(&self, env_var: &str, value: &str) -> String {
-        format!("setx {} \"{}\"", env_var, value)
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result {
+        writeln!(f, "${} = \"{}\"", env_var, value)
     }
 
-    fn unset_env_var(&self, env_var: &str) -> String {
-        format!("setx {} \"\"", env_var)
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result {
+        writeln!(f, "del ${}", env_var)
     }
 
-    fn run_script(&self, path: &Path) -> String {
-        format!(". {}", path.to_string_lossy())
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result {
+        writeln!(f, "source-bash \"{}\"", path.to_string_lossy())
     }
 
-    fn extension(&self) -> String {
-        "xsh".to_string()
-    }
-
-    fn set_path(&self, paths: &[PathBuf]) -> String {
-        let path = paths
-            .iter()
-            .map(|path| path.to_str().unwrap())
-            .collect::<Vec<&str>>()
-            .join(";");
-        self.set_env_var("PATH", &path)
+    fn extension(&self) -> &OsStr {
+        OsStr::new("sh")
     }
 }
 
-pub struct ShellScript {
-    shell: Box<dyn Shell>,
-    lines: Vec<String>,
+pub struct CmdExe;
+
+impl Shell for CmdExe {
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result {
+        writeln!(f, "@SET \"{}={}\"", env_var, value)
+    }
+
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result {
+        writeln!(f, "@SET {}=", env_var)
+    }
+
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result {
+        writeln!(f, "@CALL \"{}\"", path.to_string_lossy())
+    }
+
+    fn extension(&self) -> &OsStr {
+        OsStr::new("bat")
+    }
 }
 
-impl ShellScript {
-    pub fn new(shell: Box<dyn Shell>) -> ShellScript {
-        ShellScript {
+pub struct PowerShell;
+
+impl Shell for PowerShell {
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result {
+        writeln!(f, "$Env:{} = \"{}\"", env_var, value)
+    }
+
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result {
+        writeln!(f, "$Env:{}=\"\"", env_var)
+    }
+
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result {
+        writeln!(f, ". \"{}\"", path.to_string_lossy())
+    }
+
+    fn extension(&self) -> &OsStr {
+        OsStr::new("ps1")
+    }
+}
+
+pub struct Fish;
+
+impl Shell for Fish {
+    fn set_env_var(&self, f: &mut impl Write, env_var: &str, value: &str) -> std::fmt::Result {
+        writeln!(f, "set -gx {} \"{}\"", env_var, value)
+    }
+
+    fn unset_env_var(&self, f: &mut impl Write, env_var: &str) -> std::fmt::Result {
+        writeln!(f, "set -e {}", env_var)
+    }
+
+    fn run_script(&self, f: &mut impl Write, path: &Path) -> std::fmt::Result {
+        writeln!(f, "source \"{}\"", path.to_string_lossy())
+    }
+
+    fn extension(&self) -> &OsStr {
+        OsStr::new("fish")
+    }
+}
+
+pub struct ShellScript<T: Shell> {
+    shell: T,
+    pub contents: String,
+}
+
+impl<T: Shell> ShellScript<T> {
+    pub fn new(shell: T) -> Self {
+        Self {
             shell,
-            lines: Vec::new(),
+            contents: String::new(),
         }
     }
 
-    pub fn set_env_var(&mut self, env_var: &str, value: &str) -> &mut ShellScript {
-        self.lines.push(self.shell.set_env_var(env_var, value));
+    pub fn set_env_var(&mut self, env_var: &str, value: &str) -> &mut Self {
+        self.shell
+            .set_env_var(&mut self.contents, env_var, value)
+            .unwrap();
         self
     }
 
-    pub fn unset_env_var(&mut self, env_var: &str) -> &mut ShellScript {
-        self.lines.push(self.shell.unset_env_var(env_var));
+    pub fn unset_env_var(&mut self, env_var: &str) -> &mut Self {
+        self.shell
+            .unset_env_var(&mut self.contents, env_var)
+            .unwrap();
         self
     }
 
-    pub fn set_path(&mut self, paths: &[PathBuf]) -> &mut ShellScript {
-        self.lines.push(self.shell.set_path(paths));
+    pub fn set_path(&mut self, paths: &[PathBuf]) -> &mut Self {
+        self.shell.set_path(&mut self.contents, paths).unwrap();
         self
     }
 
-    pub fn run_script(&mut self, path: &Path) -> &mut ShellScript {
-        self.lines.push(self.shell.run_script(path));
+    pub fn run_script(&mut self, path: &Path) -> &mut Self {
+        self.shell.run_script(&mut self.contents, path).unwrap();
         self
-    }
-}
-
-impl Display for ShellScript {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", self.lines.join("\n"))
     }
 }
 
@@ -233,17 +185,13 @@ mod tests {
 
     #[test]
     fn test_bash() {
-        let mut script = ShellScript::new(Box::new(Bash));
+        let mut script = ShellScript::new(Bash);
+
         script
             .set_env_var("FOO", "bar")
             .unset_env_var("FOO")
             .run_script(&PathBuf::from_str("foo.sh").expect("blah"));
 
-        assert_eq!(
-            script.to_string(),
-            "export FOO=bar\n\
-             unset FOO\n\
-             . foo.sh"
-        );
+        insta::assert_snapshot!(script.contents);
     }
 }

@@ -2,5 +2,6 @@
 source: crates/rattler_shell/src/lib.rs
 expression: script
 ---
-$env:PATH = "__PREFIX__/bin;/usr/local/bin;/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin;/opt/homebrew/bin;/opt/homebrew/sbin;/usr/local/bin;/System/Cryptexes/App/usr/bin;/usr/bin;/bin;/usr/sbin;/sbin;/Library/Apple/usr/bin;/Users/wolfv/micromamba/bin;/Users/wolfv/micromamba/condabin;/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin;/opt/homebrew/bin;/opt/homebrew/sbin;/Users/wolfv/.cargo/bin"
-$env:CONDA_PREFIX = "__PREFIX__"
+$Env:PATH = "__PREFIX__/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+$Env:CONDA_PREFIX = "__PREFIX__"
+
