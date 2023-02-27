@@ -38,6 +38,7 @@ struct Opt {
 #[derive(Debug, clap::Subcommand)]
 enum Command {
     Create(commands::create::Opt),
+    Run(commands::run::Opt),
 }
 
 /// Entry point of the `rattler` cli.
@@ -68,5 +69,6 @@ async fn main() -> anyhow::Result<()> {
     // Dispatch the selected comment
     match opt.command {
         Command::Create(opts) => commands::create::create(opts).await,
+        Command::Run(opts) => commands::run::run(opts).await,
     }
 }
