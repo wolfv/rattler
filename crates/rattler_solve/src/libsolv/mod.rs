@@ -102,9 +102,12 @@ impl SolverBackend for LibsolvBackend {
         solver.set_flag(SolverFlag::allow_uninstall(), true);
         solver.set_flag(SolverFlag::allow_downgrade(), true);
 
-        let transaction = solver
-            .solve(&mut goal)
-            .map_err(|_| SolveError::Unsolvable)?;
+        let transaction = match solver.solve(&mut goal) {
+            Ok(transaction) => transaction,
+            Err(_) => {
+                return Err(SolveError::Unsolvable);
+            }
+        };
 
         let required_records =
             get_required_packages(&pool, &repo_mapping, &transaction, &all_repodata_records)

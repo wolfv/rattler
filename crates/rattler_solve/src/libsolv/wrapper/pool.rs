@@ -1,4 +1,4 @@
-use super::{c_string, ffi, repo::Repo, solvable::SolvableId, solver::Solver};
+use super::{c_string, ffi, repo::Repo, solvable::SolvableId, solver::Solver, queue::Queue};
 use crate::libsolv::wrapper::ffi::Id;
 use rattler_conda_types::MatchSpec;
 use std::{
@@ -195,6 +195,16 @@ impl Pool {
             );
             (id != 0).then_some(StringId(id))
         }
+    }
+
+    /// Returns a list of solvables that match the provided id (id can be created from matchspec)
+    pub fn select_by_id(&self, id: Id) -> Vec<SolvableId> {
+        let mut solvables = Queue::new();
+        let mut job = Queue::new();
+        job.push_id(ffi::SOLVER_SOLVABLE_PROVIDES);
+        job.push_id(id);
+        unsafe { ffi::selection_solvables(self, job, solvables); }
+        solvables.iter().map(|id| SolvableId(*id)).collect()
     }
 }
 
