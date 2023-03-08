@@ -8,7 +8,7 @@ mod explicit_environment_spec;
 mod match_spec;
 mod no_arch_type;
 mod platform;
-mod repo_data;
+pub mod repo_data;
 mod repo_data_record;
 mod run_export;
 mod utils;

@@ -1,3 +1,5 @@
+//! Types for Conda repodata patches.
+
 use fxhash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none, OneOrMany};

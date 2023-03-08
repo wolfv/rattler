@@ -11,10 +11,28 @@ use fxhash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none, DisplayFromStr, OneOrMany};
 
+use crate::package::IndexJson;
 use crate::{Channel, NoArchType, RepoDataRecord, Version};
 
+fn sort_map_alphabetically<T: Serialize, S: serde::Serializer>(
+    value: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let value = serde_json::to_value(value).map_err(serde::ser::Error::custom)?;
+    value.serialize(serializer)
+}
+
+fn sort_set_alphabetically<S: serde::Serializer>(
+    value: &FxHashSet<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = Vec::from_iter(value.iter().cloned());
+    value.sort();
+    value.serialize(serializer)
+}
+
 /// [`RepoData`] is an index of package binaries available on in a subdirectory of a Conda channel.
-#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct RepoData {
     /// The version of the repodata format
     #[serde(rename = "repodata_version")]
@@ -24,20 +42,21 @@ pub struct RepoData {
     pub info: Option<ChannelInfo>,
 
     /// The tar.bz2 packages contained in the repodata.json file
+    #[serde(serialize_with = "sort_map_alphabetically")]
     pub packages: FxHashMap<String, PackageRecord>,
 
     /// The conda packages contained in the repodata.json file (under a different key for
     /// backwards compatibility with previous conda versions)
-    #[serde(rename = "packages.conda")]
+    #[serde(rename = "packages.conda", serialize_with = "sort_map_alphabetically")]
     pub conda_packages: FxHashMap<String, PackageRecord>,
 
     /// removed packages (files are still accessible, but they are not installable like regular packages)
-    #[serde(default)]
+    #[serde(default, serialize_with = "sort_set_alphabetically")]
     pub removed: FxHashSet<String>,
 }
 
 /// Information about subdirectory of channel in the Conda [`RepoData`]
-#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ChannelInfo {
     /// The channel's subdirectory
     pub subdir: String,
@@ -161,5 +180,38 @@ impl RepoData {
             })
         }
         records
+    }
+}
+
+impl PackageRecord {
+    /// Creates a new [`PackageRecord`] from a [`IndexJson`] and optionally a size, SHA256 and MD5 hash.
+    pub fn from_index_json(
+        index: IndexJson,
+        size: Option<u64>,
+        sha256: Option<String>,
+        md5: Option<String>,
+    ) -> Self {
+        Self {
+            name: index.name,
+            version: index.version,
+            build: index.build,
+            build_number: index.build_number,
+            subdir: index.subdir.expect("subdir is not set in index.json"),
+            md5,
+            sha256,
+            size,
+            arch: index.arch,
+            platform: index.platform,
+            depends: index.depends,
+            constrains: index.constrains,
+            track_features: index.track_features,
+            features: index.features,
+            noarch: index.noarch,
+            license: index.license,
+            license_family: index.license_family,
+            timestamp: index.timestamp,
+            legacy_bz2_md5: None,
+            legacy_bz2_size: None,
+        }
     }
 }
