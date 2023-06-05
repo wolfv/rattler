@@ -1,11 +1,8 @@
 //! Contains business logic to retrieve the results from libsolv after attempting to resolve a conda
 //! environment
 
-use crate::libsolv::wrapper::pool::{Pool, StringId};
-use crate::libsolv::wrapper::repo::RepoId;
-use crate::libsolv::wrapper::solvable::SolvableId;
-use crate::libsolv::wrapper::transaction::Transaction;
-use crate::libsolv::wrapper::{ffi, solvable};
+use libsolv_rs::pool::{Id, Pool};
+use libsolv_rs::solver::{Transaction, TransactionKind};
 use rattler_conda_types::RepoDataRecord;
 use std::collections::HashMap;
 
@@ -15,34 +12,24 @@ use std::collections::HashMap;
 /// containing their ids.
 pub fn get_required_packages(
     pool: &Pool,
-    repo_mapping: &HashMap<RepoId, usize>,
+    repo_mapping: &HashMap<Id, usize>,
     transaction: &Transaction,
     repodata_records: &[&[RepoDataRecord]],
-) -> Result<Vec<RepoDataRecord>, Vec<ffi::Id>> {
+) -> Result<Vec<RepoDataRecord>, Vec<TransactionKind>> {
     let mut required_packages = Vec::new();
     let mut unsupported_operations = Vec::new();
 
-    let solvable_index_id = pool
-        .find_interned_str("solvable:repodata_record_index")
-        .unwrap();
-
-    // Safe because `transaction.steps` is an active queue
-    let transaction_queue = transaction.get_steps();
-
-    for id in transaction_queue.iter() {
-        let transaction_type = transaction.transaction_type(id);
-
+    for &(id, kind) in &transaction.steps {
         // Retrieve the repodata record corresponding to this solvable
-        let (repo_index, solvable_index) =
-            get_solvable_indexes(pool, repo_mapping, solvable_index_id, id);
+        let (repo_index, solvable_index) = get_solvable_indexes(pool, repo_mapping, id);
         let repodata_record = &repodata_records[repo_index][solvable_index];
 
-        match transaction_type as u32 {
-            ffi::SOLVER_TRANSACTION_INSTALL => {
+        match kind {
+            TransactionKind::Install => {
                 required_packages.push(repodata_record.clone());
             }
             _ => {
-                unsupported_operations.push(transaction_type);
+                unsupported_operations.push(kind);
             }
         }
     }
@@ -54,19 +41,11 @@ pub fn get_required_packages(
     Ok(required_packages)
 }
 
-fn get_solvable_indexes(
-    pool: &Pool,
-    repo_mapping: &HashMap<RepoId, usize>,
-    solvable_index_id: StringId,
-    id: SolvableId,
-) -> (usize, usize) {
-    let solvable = id.resolve_raw(pool);
-    let solvable_index =
-        solvable::lookup_num(solvable.as_ptr(), solvable_index_id).unwrap() as usize;
+fn get_solvable_indexes(pool: &Pool, repo_mapping: &HashMap<Id, usize>, id: Id) -> (usize, usize) {
+    let solvable = pool.resolve_solvable(id);
+    let solvable_index = solvable.metadata.original_index.unwrap();
 
-    // Safe because there are no active mutable borrows of any solvable at this stage
-    let repo_id = RepoId::from_ffi_solvable(unsafe { solvable.as_ref() });
-
+    let repo_id = solvable.repo_id();
     let repo_index = repo_mapping[&repo_id];
 
     (repo_index, solvable_index)

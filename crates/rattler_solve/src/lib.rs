@@ -6,9 +6,7 @@
 mod libsolv;
 mod solver_backend;
 
-pub use libsolv::{
-    cache_repodata as cache_libsolv_repodata, LibcByteSlice, LibsolvBackend, LibsolvRepoData,
-};
+pub use libsolv::{LibsolvBackend, LibsolvRepoData};
 pub use solver_backend::SolverBackend;
 use std::fmt;
 
