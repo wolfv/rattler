@@ -33,14 +33,11 @@ pub fn add_repodata_records(
     // Keeps a mapping from packages added to the repo to the type and solvable
     let mut package_to_type: HashMap<&str, (ArchiveType, Id)> = HashMap::new();
 
-    // Through `data` we can manipulate solvables (see the `Repodata` docs for details)
-    let data_id = pool.repo_mut(repo_id).add_repodata();
-
     let mut solvable_ids = Vec::new();
     for (repo_data_index, repo_data) in repo_datas.iter().enumerate() {
         // Create a solvable for the package
         let solvable_id =
-            match add_or_reuse_solvable(pool, repo_id, data_id, &mut package_to_type, repo_data) {
+            match add_or_reuse_solvable(pool, repo_id, &mut package_to_type, repo_data) {
                 Some(id) => id,
                 None => continue,
             };
@@ -86,7 +83,7 @@ pub fn add_repodata_records(
                 pool.conda_matchspec(&match_spec.name.unwrap(), conda_version(match_spec.version));
 
             // Add it to the list of constraints of this solvable
-            pool.repo_mut(repo_id).repodata_mut(data_id).add_idarray(
+            pool.repo_mut(repo_id).repodata_mut().add_idarray(
                 solvable_id,
                 solvable_constraints,
                 match_spec_id,
@@ -98,7 +95,7 @@ pub fn add_repodata_records(
             let track_feature = track_features.trim();
             if !track_feature.is_empty() {
                 let string_id = pool.intern_str(track_features.trim()).into();
-                pool.repo_mut(repo_id).repodata_mut(data_id).add_idarray(
+                pool.repo_mut(repo_id).repodata_mut().add_idarray(
                     solvable_id,
                     solvable_track_features,
                     string_id,
@@ -109,7 +106,7 @@ pub fn add_repodata_records(
         // License
         if let Some(license) = record.license.as_ref() {
             let license_id = pool.intern_str(license);
-            pool.repo_mut(repo_id).repodata_mut(data_id).add_idarray(
+            pool.repo_mut(repo_id).repodata_mut().add_idarray(
                 solvable_id,
                 solvable_license_id,
                 license_id,
@@ -117,7 +114,7 @@ pub fn add_repodata_records(
         }
 
         // Timestamp
-        let data = pool.repo_mut(repo_id).repodata_mut(data_id);
+        let data = pool.repo_mut(repo_id).repodata_mut();
         if let Some(timestamp) = record.timestamp {
             data.set_num(
                 solvable_id,
@@ -167,7 +164,6 @@ pub fn add_repodata_records(
 fn add_or_reuse_solvable<'a>(
     pool: &mut Pool,
     repo_id: Id,
-    data_id: Id,
     package_to_type: &mut HashMap<&'a str, (ArchiveType, Id)>,
     repo_data: &'a RepoDataRecord,
 ) -> Option<Id> {
@@ -188,7 +184,7 @@ fn add_or_reuse_solvable<'a>(
                     package_to_type.insert(filename, (archive_type, old_solvable_id));
 
                     // Reset and reuse the old solvable
-                    reset_solvable(pool, repo_id, data_id, old_solvable_id);
+                    reset_solvable(pool, repo_id, old_solvable_id);
                     return Some(old_solvable_id);
                 }
                 Ordering::Equal => {
@@ -208,8 +204,6 @@ fn add_or_reuse_solvable<'a>(
 }
 
 pub fn add_virtual_packages(pool: &mut Pool, repo_id: Id, packages: &[GenericVirtualPackage]) {
-    let data_id = pool.repo_mut(repo_id).add_repodata();
-
     let solvable_buildflavor_id = pool.find_interned_str(SOLVABLE_BUILDFLAVOR).unwrap();
 
     for package in packages {
@@ -228,7 +222,7 @@ pub fn add_virtual_packages(pool: &mut Pool, repo_id: Id, packages: &[GenericVir
 
         // Build string
         let build_str_id = pool.intern_str(&package.build_string);
-        pool.repo_mut(repo_id).repodata_mut(data_id).add_idarray(
+        pool.repo_mut(repo_id).repodata_mut().add_idarray(
             solvable_id,
             solvable_buildflavor_id,
             build_str_id,
@@ -236,13 +230,13 @@ pub fn add_virtual_packages(pool: &mut Pool, repo_id: Id, packages: &[GenericVir
     }
 }
 
-fn reset_solvable(pool: &mut Pool, repo_id: Id, data_id: Id, solvable_id: Id) {
+fn reset_solvable(pool: &mut Pool, repo_id: Id, solvable_id: Id) {
     let blank_solvable = pool.add_solvable(repo_id);
 
     // Replace the existing solvable with the blank one
     pool.swap_solvables(blank_solvable, solvable_id);
     pool.repo_mut(repo_id)
-        .repodata_mut(data_id)
+        .repodata_mut()
         .swap_attrs(blank_solvable, solvable_id);
 
     // Remove the highest solvable, which contains stale data
