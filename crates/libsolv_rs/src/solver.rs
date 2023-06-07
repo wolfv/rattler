@@ -1,11 +1,62 @@
 use crate::pool::{MatchSpecId, Pool};
-use crate::rules::Rule;
+use crate::rules::{Rule, RuleKind};
 use crate::solvable::SolvableId;
+use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
 use crate::solve_problem::SolveProblem;
-use rattler_conda_types::MatchSpec;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
+
+#[derive(Copy, Clone, PartialOrd, Ord, Eq, PartialEq)]
+pub struct RuleId(u32);
+
+impl RuleId {
+    pub fn new(index: usize) -> Self {
+        Self(index as u32)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Decision {
+    Decided(Decided),
+    Undecided,
+}
+
+impl Decision {
+    fn decided(self) -> Decided {
+        match self {
+            Decision::Decided(d) => d,
+            Decision::Undecided => panic!("undecided!"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+struct Decided {
+    solvable: SolvableId,
+    value: bool
+}
+
+impl Decided {
+    fn new(solvable: SolvableId, value: bool) -> Self {
+        Self {
+            solvable,
+            value
+        }
+    }
+
+    fn negate(mut self) -> Self {
+        self.value = !self.value;
+        self
+    }
+
+    fn index(self) -> usize {
+        self.solvable.index()
+    }
+}
 
 pub struct Transaction {
     pub steps: Vec<(SolvableId, TransactionKind)>,
@@ -54,11 +105,19 @@ pub struct Solver {
     // The job we are solving
     job: VecDeque<()>,
 
-    // All rules
+    propagate_index: usize,
+
     rules: Vec<Rule>,
+    watches: Vec<RuleId>,
 
     // All assertion rules
-    rule_assertions: VecDeque<()>,
+    rule_assertions: VecDeque<RuleId>,
+
+    decision_queue: VecDeque<Decision>,
+    decision_queue_why: VecDeque<RuleId>,
+    decision_queue_reason: VecDeque<u32>,
+
+    learnt_rules_start: RuleId,
 
     recommendsmap: Map,
     suggestsmap: Map,
@@ -69,7 +128,7 @@ pub struct Solver {
     /// = 0: undecided
     /// > 0: level of decision when installed
     /// < 0: level of decision when conflict
-    decision_map: Vec<u64>,
+    decision_map: Vec<i64>,
 
     /* list of lists of conflicting rules, < 0 for job rules */
     problems: VecDeque<()>,
@@ -99,8 +158,18 @@ impl Solver {
 
         Solver {
             job: VecDeque::new(),
-            rules: Vec::new(),
-            rule_assertions: VecDeque::new(),
+
+            propagate_index: 0,
+
+            rules: vec![Rule::new(RuleKind::InstallRoot)],
+            watches: Vec::new(),
+            rule_assertions: VecDeque::from([RuleId::new(0)]),
+            decision_queue: VecDeque::new(),
+            decision_queue_why: VecDeque::new(),
+            decision_queue_reason: VecDeque::new(),
+
+            learnt_rules_start: RuleId(0),
+
             recommendsmap: Map::with_capacity(pool.nsolvables()),
             suggestsmap: Map::with_capacity(pool.nsolvables()),
             noupdate: Map::with_capacity(42),
@@ -224,6 +293,19 @@ impl Solver {
             }
         }
 
+        // All new rules are learnt after this point
+        self.learnt_rules_start = RuleId::new(self.rules.len());
+
+        // Create watches chains
+        self.make_watches();
+
+        // Create assertion index. It is only used to speed up make_rule_decisions() a bit
+        for (i, rule) in self.rules.iter().enumerate().skip(1) {
+            if rule.is_assertion(self.pool()) {
+                self.rule_assertions.push_back(RuleId::new(i));
+            }
+        }
+
         // Run SAT
         self.run_sat();
 
@@ -286,7 +368,8 @@ impl Solver {
                 );
 
                 // Create requires rule
-                self.rules.push(Rule::Requires(candidate, dep));
+                self.rules
+                    .push(Rule::new(RuleKind::Requires(candidate, dep)));
 
                 // Ensure the candidates have their rules added too
                 for &dep_candidate in dep_candidates {
@@ -298,7 +381,8 @@ impl Solver {
 
             // Constrains
             for &dep in &solvable.constrains {
-                self.rules.push(Rule::Constrains(candidate, dep));
+                self.rules
+                    .push(Rule::new(RuleKind::Constrains(candidate, dep)));
 
                 // It is not necessary to create rules for the packages that match a `constrains`
                 // match spec, because they are not a dependency
@@ -306,5 +390,248 @@ impl Solver {
         }
     }
 
-    fn run_sat(&mut self) {}
+    fn run_sat(&mut self) {
+        // This thng is true, right?
+        let disable_rules = true;
+
+        // let mut decision_queue = VecDeque::new();
+        let mut level = 0;
+
+        // What is this again?
+        let mut root_level = 1;
+
+        loop {
+            // First rule decision
+            if level == 0 {
+                match self.make_rule_decisions() {
+                    Ok(new_level) => level = new_level,
+                    Err(_) => break,
+                }
+
+                if let Err(cause) = self.propagate(level) {
+                    self.analyze_unsolvable(cause, false);
+                    continue;
+                }
+
+                root_level = level + 1;
+            }
+        }
+    }
+
+    fn make_rule_decisions(&mut self) -> Result<u32, ()> {
+        assert!(self.decision_queue.is_empty());
+
+        // The root solvable is installed first
+        self.decision_queue.push_back(Decision::Decided(Decided::new(SolvableId::root(), true)));
+        self.decision_queue_why.push_back(RuleId::new(0));
+        self.decision_queue_reason.push_back(0);
+        self.decision_queue_reason.push_back(0);
+        self.decision_map[SolvableId::root().index()] = 1; // Installed at level 1
+
+        let mut have_disabled = false;
+
+        let decision_start = 1;
+        loop {
+            // If we needed to re-run, back up decisions to decision_start
+            while self.decision_queue.len() > decision_start {
+                let decision = self.decision_queue.pop_back().unwrap();
+                self.decision_queue_why.pop_back();
+
+                // Decision becomes undecided
+                self.decision_map[decision.decided().index()] = 0;
+            }
+
+            let mut visited_assertions = 0;
+            for &rule_id in &self.rule_assertions {
+                visited_assertions += 1;
+
+                let rule = &mut self.rules[rule_id.index()];
+
+                if have_disabled && rule_id >= self.learnt_rules_start {
+                    // Just started with learnt rule assertions. If we have disabled some rules,
+                    // adapt the learnt rule status
+                    Solver::enable_disable_learnt_rules();
+                    have_disabled = false;
+                }
+
+                if !rule.enabled {
+                    continue;
+                }
+
+                let Some((solvable, asserted_value)) = rule.assertion(&self.pool) else {
+                    // The rule is not an assertion
+                    continue;
+                };
+
+                let decision = self.decision_map[solvable.index()];
+                if decision == 0 {
+                    // Not yet decided
+                    self.decision_queue.push_back(Decision::Undecided);
+                    self.decision_queue_why.push_back(rule_id);
+                    self.decision_map[solvable.index()] = -1;
+                    continue;
+                }
+
+                if asserted_value && decision > 0 {
+                    // OK to install
+                    continue;
+                }
+
+                if !asserted_value && decision < 0 {
+                    // OK to not install
+                    continue;
+                }
+
+                /*
+                 * found a conflict!
+                 *
+                 * The rule we're currently processing says something
+                 * different than a previous decision
+                 * on this literal
+                 */
+
+                if rule_id >= self.learnt_rules_start {
+                    /* conflict with a learnt rule */
+                    /* can happen when packages cannot be installed for multiple reasons. */
+                    /* we disable the learnt rule in this case */
+                    /* (XXX: we should really do something like analyze_unsolvable_rule here!) */
+                    Solver::disable_rule(rule_id);
+                    continue;
+                }
+
+                // Find the decision which is opposite of the rule
+                // let opposite_decision = Decision::Decided(solvable, !asserted_value);
+                // let i = self
+                //     .decision_queue
+                //     .iter()
+                //     .position(|&decision| decision == opposite_decision)
+                //     .unwrap();
+                // let conflicting_rule = if solvable == SolvableId::root() {
+                //     RuleId::new(0)
+                // } else {
+                //     let ori = self.decision_queue_why[i];
+                //     assert!(ori.index() > 0);
+                //     ori
+                // };
+
+                Solver::record_problem(rule_id);
+
+                // Skipped: record proof
+
+                // Disable all problem rules
+                // solver_disableproblemset(solv, oldproblemcount);
+                have_disabled = true;
+                break;
+            }
+
+            if visited_assertions == self.rule_assertions.len() {
+                break
+            } else {
+                continue
+            }
+        }
+
+        Ok(1)
+    }
+
+    fn propagate(&mut self, _level: u32) -> Result<(), Rule> {
+        for decision in self.decision_queue.iter().skip(self.propagate_index) {
+            self.propagate_index += 1;
+
+            // TODO: what about undecided packages in the queue?
+            /*
+               * 'pkg' was just decided
+               * negate because our watches trigger if literal goes FALSE
+               */
+            let pkg = decision.decided().negate();
+
+            // Foreach rule where 'pkg' is now FALSE
+            let mut rule_id = self.watches[self.pool.solvables.len() + pkg.index()];
+            loop {
+                if rule_id.index() == 0 {
+                    break;
+                }
+
+                let rule = &self.rules[rule_id.index()];
+                if !rule.enabled {
+                    // rule is disabled, goto next
+                    if pkg.solvable == rule.solvable_id() {
+                        rule_id = rule.n1;
+                    } else {
+                        rule_id = rule.n2;
+                    }
+
+                    continue;
+                }
+
+                /*
+                * 'pkg' was just decided, so this rule may now be unit.
+	            */
+                /* find the other watch */
+                let Some((rule_solvable, rule_candidate)) = rule.solvable_and_candidate(&self.pool) else {
+                    panic!("fingers crossed that this is unreachable?")
+                };
+
+                let (other_watch, next_rp) = if pkg.solvable == rule_solvable {
+                    // Keep the watch on the candidate, advance the watch on the solvable
+                    (rule_candidate, rule.n1)
+                } else {
+                    // Keep the watch on the solvable, advance the watch on the candidate
+                    (rule_solvable, rule.n2)
+                };
+
+                /*
+                   * if the other watch is true we have nothing to do
+                   */
+                let value_from_map = self.decision_map[other_watch.index()] > 0;
+                if value_from_map {
+                    continue;
+                }
+
+                /*
+                   * The other literal is FALSE or UNDEF
+                   *
+                   */
+
+                // TODO: continue
+            }
+        }
+
+        Ok(())
+    }
+
+    fn analyze_unsolvable(&mut self, _rule: Rule, _disable_rules: bool) -> u32 {
+        todo!()
+    }
+
+    fn enable_disable_learnt_rules() {
+        // See enabledisablelearntrules
+    }
+
+    fn disable_rule(_rule_id: RuleId) {}
+
+    fn record_problem(_rule_id: RuleId) {
+        // See solver_recordproblem
+        // TODO: this is only for error reporting, I assume?
+    }
+
+    fn make_watches(&mut self) {
+        // Lower half for removals, upper half for installs
+        self.watches = vec![RuleId::new(0); self.pool.solvables.len() * 2];
+
+        for (i, rule) in self.rules.iter_mut().enumerate().skip(1).rev() {
+            // Watches are only created for rules with candidates, not for assertions
+            if let Some((solvable_id, first_candidate_id)) =
+                rule.solvable_and_candidate(&self.pool)
+            {
+                let solvable_watch_index = self.pool.solvables.len() + solvable_id.index();
+                rule.n1 = RuleId::new(0);
+                self.watches[solvable_watch_index] = RuleId::new(i);
+
+                let candidate_watch_index = self.pool.solvables.len() + first_candidate_id.index();
+                rule.n2 = RuleId::new(0);
+                self.watches[candidate_watch_index] = RuleId::new(i);
+            }
+        }
+    }
 }

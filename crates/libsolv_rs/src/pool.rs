@@ -38,7 +38,6 @@ impl StringId {
     }
 }
 
-
 #[derive(Clone, Copy)]
 pub struct MatchSpecId(u32);
 
@@ -47,7 +46,7 @@ impl MatchSpecId {
         Self(index as u32)
     }
 
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -79,7 +78,7 @@ pub struct Pool {
 
 impl Pool {
     pub fn new() -> Self {
-        let mut pool = Pool {
+        Pool {
             solvables: vec![Solvable::Root(Vec::new())],
             total_repos: 0,
 
@@ -93,9 +92,7 @@ impl Pool {
             match_specs_to_ids: HashMap::default(),
             match_specs: Vec::new(),
             match_spec_to_candidates: Vec::new(),
-        };
-
-        pool
+        }
     }
 
     pub fn new_repo(&mut self, _url: impl AsRef<str>) -> RepoId {

@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
-use rattler_conda_types::MatchSpec;
 use crate::solvable::SolvableId;
+use rattler_conda_types::MatchSpec;
+use std::collections::VecDeque;
 
 pub enum CandidateSource {
     MatchSpec(MatchSpec),
