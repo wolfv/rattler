@@ -1,22 +1,14 @@
 use crate::{SolveError, SolverBackend, SolverTask};
 use input::{add_repodata_records, add_virtual_packages};
-use libsolv_rs::conda::CondaVersion;
-use libsolv_rs::pool::{Pool, Verbosity};
-use libsolv_rs::solver::{SolveGoal, Solver};
+use libsolv_rs::pool::Pool;
+use libsolv_rs::solve_jobs::SolveJobs;
+use libsolv_rs::solver::Solver;
 use output::get_required_packages;
-use rattler_conda_types::{RepoDataRecord, VersionSpec};
+use rattler_conda_types::RepoDataRecord;
 use std::collections::HashMap;
 
 mod input;
 mod output;
-
-fn conda_version(version: Option<VersionSpec>) -> CondaVersion {
-    match version {
-        None | Some(VersionSpec::None) => CondaVersion::None,
-        Some(VersionSpec::Any) => CondaVersion::Any,
-        Some(version_spec) => CondaVersion::Some(version_spec.to_string()),
-    }
-}
 
 /// Represents the information required to load available packages into libsolv for a single channel
 /// and platform combination
@@ -47,10 +39,10 @@ impl SolverBackend for LibsolvBackend {
         let mut pool = Pool::new();
 
         // Setup proper logging for the pool
-        pool.set_debug_callback(|msg, _flags| {
-            tracing::event!(tracing::Level::DEBUG, "{}", msg.trim_end());
-        });
-        pool.set_debug_level(Verbosity::Low);
+        // pool.set_debug_callback(|msg, flags| {
+        //     tracing::event!(tracing::Level::DEBUG, flags, "{}", msg);
+        // });
+        // pool.set_debug_level(Verbosity::Low);
 
         // Add virtual packages
         let repo_id = pool.new_repo("virtual_packages");
@@ -93,7 +85,7 @@ impl SolverBackend for LibsolvBackend {
         all_repodata_records.push(&task.pinned_packages);
 
         // Add matchspec to the queue
-        let mut goal = SolveGoal::default();
+        let mut goal = SolveJobs::default();
 
         // Favor the currently installed packages
         for favor_solvable in installed_solvables {
@@ -107,8 +99,7 @@ impl SolverBackend for LibsolvBackend {
 
         // Specify the matchspec requests
         for spec in task.specs {
-            let id = pool.conda_matchspec(&spec.name.unwrap(), conda_version(spec.version));
-            goal.install(id)
+            goal.install(spec);
         }
 
         // Construct a solver and solve the problems in the queue
@@ -117,7 +108,7 @@ impl SolverBackend for LibsolvBackend {
         cfg.allow_uninstall = true;
         cfg.allow_downgrade = true;
 
-        let transaction = solver.solve(&mut goal).map_err(SolveError::Unsolvable)?;
+        let transaction = solver.solve(goal).map_err(SolveError::Unsolvable)?;
 
         let required_records = get_required_packages(
             solver.pool(),

@@ -1,37 +1,23 @@
 //! Contains business logic that loads information into libsolv in order to solve a conda
 //! environment
 
-use crate::libsolv::conda_version;
-use libsolv_rs::pool::keys::*;
-use libsolv_rs::pool::{Id, Pool};
+use libsolv_rs::pool::{Pool, RepoId};
+use libsolv_rs::solvable::SolvableId;
 use rattler_conda_types::package::ArchiveType;
-use rattler_conda_types::{GenericVirtualPackage, MatchSpec, RepoDataRecord};
+use rattler_conda_types::{GenericVirtualPackage, PackageRecord, RepoDataRecord};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::str::FromStr;
 
 /// Adds [`RepoDataRecord`] to `repo`
 ///
 /// Panics if the repo does not belong to the pool
 pub fn add_repodata_records(
     pool: &mut Pool,
-    repo_id: Id,
+    repo_id: RepoId,
     repo_datas: &[RepoDataRecord],
-) -> Vec<Id> {
-    // Get all the IDs (these strings are internal to libsolv and always present, so we can
-    // unwrap them at will)
-    let solvable_buildflavor_id = pool.find_interned_str(SOLVABLE_BUILDFLAVOR).unwrap();
-    let solvable_buildtime_id = pool.find_interned_str(SOLVABLE_BUILDTIME).unwrap();
-    let solvable_buildversion_id = pool.find_interned_str(SOLVABLE_BUILDVERSION).unwrap();
-    let solvable_constraints = pool.find_interned_str(SOLVABLE_CONSTRAINS).unwrap();
-    let solvable_download_size_id = pool.find_interned_str(SOLVABLE_DOWNLOADSIZE).unwrap();
-    let solvable_license_id = pool.find_interned_str(SOLVABLE_LICENSE).unwrap();
-    let solvable_pkg_id = pool.find_interned_str(SOLVABLE_PKGID).unwrap();
-    let solvable_checksum = pool.find_interned_str(SOLVABLE_CHECKSUM).unwrap();
-    let solvable_track_features = pool.find_interned_str(SOLVABLE_TRACK_FEATURES).unwrap();
-
+) -> Vec<SolvableId> {
     // Keeps a mapping from packages added to the repo to the type and solvable
-    let mut package_to_type: HashMap<&str, (ArchiveType, Id)> = HashMap::new();
+    let mut package_to_type: HashMap<&str, (ArchiveType, SolvableId)> = HashMap::new();
 
     let mut solvable_ids = Vec::new();
     for (repo_data_index, repo_data) in repo_datas.iter().enumerate() {
@@ -45,113 +31,28 @@ pub fn add_repodata_records(
         // Store the current index so we can retrieve the original repo data record
         // from the final transaction
         pool.resolve_solvable_mut(solvable_id)
+            .package_mut()
             .metadata
             .original_index = Some(repo_data_index);
 
         let record = &repo_data.package_record;
 
-        // Intern stuff
-        let build_str_id = pool.intern_str(&record.build);
-
-        // Name and version
-        let name = pool.intern_str(record.name.as_str()).into();
+        // Version
         let evr = pool.intern_str(record.version.to_string()).into();
-        let rel_eq = pool.rel_eq(name, evr);
-        {
-            let solvable = pool.resolve_solvable_mut(solvable_id);
-            solvable.name = name;
-            solvable.evr = evr;
-            pool.add_provides(repo_id, solvable_id, rel_eq);
-        }
+        pool.resolve_solvable_mut(solvable_id).package_mut().evr = evr;
 
         // Dependencies
         for match_spec in record.depends.iter() {
-            // Create a reldep id from a matchspec
-            let match_spec = MatchSpec::from_str(&match_spec).unwrap();
-            let match_spec_id =
-                pool.conda_matchspec(&match_spec.name.unwrap(), conda_version(match_spec.version));
-
-            // Add it to the list of requirements of this solvable
-            pool.add_requires(repo_id, solvable_id, match_spec_id);
+            pool.add_dependency(solvable_id, match_spec.to_string());
         }
 
-        // Constraints
+        // Constrains
         for match_spec in record.constrains.iter() {
-            // Create a reldep id from a matchspec
-            let match_spec = MatchSpec::from_str(&match_spec).unwrap();
-            let match_spec_id =
-                pool.conda_matchspec(&match_spec.name.unwrap(), conda_version(match_spec.version));
-
-            // Add it to the list of constraints of this solvable
-            pool.repo_mut(repo_id).repodata_mut().add_idarray(
-                solvable_id,
-                solvable_constraints,
-                match_spec_id,
-            );
-        }
-
-        // Track features
-        for track_features in record.track_features.iter() {
-            let track_feature = track_features.trim();
-            if !track_feature.is_empty() {
-                let string_id = pool.intern_str(track_features.trim()).into();
-                pool.repo_mut(repo_id).repodata_mut().add_idarray(
-                    solvable_id,
-                    solvable_track_features,
-                    string_id,
-                );
-            }
-        }
-
-        // License
-        if let Some(license) = record.license.as_ref() {
-            let license_id = pool.intern_str(license);
-            pool.repo_mut(repo_id).repodata_mut().add_idarray(
-                solvable_id,
-                solvable_license_id,
-                license_id,
-            );
-        }
-
-        // Timestamp
-        let data = pool.repo_mut(repo_id).repodata_mut();
-        if let Some(timestamp) = record.timestamp {
-            data.set_num(
-                solvable_id,
-                solvable_buildtime_id,
-                timestamp.timestamp() as u64,
-            );
-        }
-
-        // Size
-        if let Some(size) = record.size {
-            data.set_num(solvable_id, solvable_download_size_id, size);
-        }
-
-        // Build string
-        data.add_idarray(solvable_id, solvable_buildflavor_id, build_str_id);
-
-        // Build number
-        data.set_str(
-            solvable_id,
-            solvable_buildversion_id,
-            &record.build_number.to_string(),
-        );
-
-        // MD5 hash
-        if let Some(md5) = record.md5.as_ref() {
-            data.set_checksum(solvable_id, solvable_pkg_id, &format!("{:x}", md5));
-        }
-
-        // Sha256 hash
-        if let Some(sha256) = record.sha256.as_ref() {
-            data.set_checksum(solvable_id, solvable_checksum, &format!("{:x}", sha256));
+            pool.add_constrains(solvable_id, match_spec.to_string());
         }
 
         solvable_ids.push(solvable_id)
     }
-
-    pool.repo_mut(repo_id).internalize();
 
     solvable_ids
 }
@@ -163,12 +64,16 @@ pub fn add_repodata_records(
 /// solvable for the `.tar.bz` version of the package).
 fn add_or_reuse_solvable<'a>(
     pool: &mut Pool,
-    repo_id: Id,
-    package_to_type: &mut HashMap<&'a str, (ArchiveType, Id)>,
+    repo_id: RepoId,
+    package_to_type: &mut HashMap<&'a str, (ArchiveType, SolvableId)>,
     repo_data: &'a RepoDataRecord,
-) -> Option<Id> {
+) -> Option<SolvableId> {
+    let name = pool.intern_str(repo_data.package_record.name.to_string());
+
     // Sometimes we can reuse an existing solvable
     if let Some((filename, archive_type)) = ArchiveType::split_str(&repo_data.file_name) {
+        let record_ptr = &repo_data.package_record as *const _;
+
         if let Some(&(other_package_type, old_solvable_id)) = package_to_type.get(filename) {
             match archive_type.cmp(&other_package_type) {
                 Ordering::Less => {
@@ -184,7 +89,7 @@ fn add_or_reuse_solvable<'a>(
                     package_to_type.insert(filename, (archive_type, old_solvable_id));
 
                     // Reset and reuse the old solvable
-                    reset_solvable(pool, repo_id, old_solvable_id);
+                    pool.reset_package(repo_id, old_solvable_id, name, unsafe { &*record_ptr });
                     return Some(old_solvable_id);
                 }
                 Ordering::Equal => {
@@ -192,7 +97,7 @@ fn add_or_reuse_solvable<'a>(
                 }
             }
         } else {
-            let solvable_id = pool.add_solvable(repo_id);
+            let solvable_id = pool.add_package(repo_id, name, unsafe { &*record_ptr });
             package_to_type.insert(filename, (archive_type, solvable_id));
             return Some(solvable_id);
         }
@@ -200,45 +105,48 @@ fn add_or_reuse_solvable<'a>(
         tracing::warn!("unknown package extension: {}", &repo_data.file_name);
     }
 
-    Some(pool.add_solvable(repo_id))
+    let record_ptr = &repo_data.package_record as *const _;
+    let solvable_id = pool.add_package(repo_id, name, unsafe { &*record_ptr });
+    Some(solvable_id)
 }
 
-pub fn add_virtual_packages(pool: &mut Pool, repo_id: Id, packages: &[GenericVirtualPackage]) {
-    let solvable_buildflavor_id = pool.find_interned_str(SOLVABLE_BUILDFLAVOR).unwrap();
+pub fn add_virtual_packages(pool: &mut Pool, repo_id: RepoId, packages: &[GenericVirtualPackage]) {
+    let packages: &'static _ = packages
+        .iter()
+        .map(|p| PackageRecord {
+            arch: None,
+            name: p.name.clone(),
+            noarch: Default::default(),
+            platform: None,
+            sha256: None,
+            size: None,
+            subdir: "".to_string(),
+            timestamp: None,
+            build_number: 0,
+            version: p.version.clone(),
+            build: p.build_string.clone(),
+            depends: Vec::new(),
+            features: None,
+            legacy_bz2_md5: None,
+            legacy_bz2_size: None,
+            license: None,
+            license_family: None,
+            constrains: vec![],
+            md5: None,
+            track_features: vec![],
+        })
+        .collect::<Vec<_>>()
+        .leak();
 
     for package in packages {
         let name = pool.intern_str(package.name.as_str()).into();
         let evr = pool.intern_str(package.version.to_string()).into();
-        let rel_eq = pool.rel_eq(name, evr);
 
         // Create a solvable for the package
-        let solvable_id = pool.add_solvable(repo_id);
-        let solvable = pool.resolve_solvable_mut(solvable_id);
+        let solvable_id = pool.add_package(repo_id, name, &package);
+        let solvable = pool.resolve_solvable_mut(solvable_id).package_mut();
 
-        // Name and version
-        solvable.name = name;
+        // Version
         solvable.evr = evr;
-        pool.add_provides(repo_id, solvable_id, rel_eq);
-
-        // Build string
-        let build_str_id = pool.intern_str(&package.build_string);
-        pool.repo_mut(repo_id).repodata_mut().add_idarray(
-            solvable_id,
-            solvable_buildflavor_id,
-            build_str_id,
-        );
     }
-}
-
-fn reset_solvable(pool: &mut Pool, repo_id: Id, solvable_id: Id) {
-    let blank_solvable = pool.add_solvable(repo_id);
-
-    // Replace the existing solvable with the blank one
-    pool.swap_solvables(blank_solvable, solvable_id);
-    pool.repo_mut(repo_id)
-        .repodata_mut()
-        .swap_attrs(blank_solvable, solvable_id);
-
-    // Remove the highest solvable, which contains stale data
-    pool.pop_solvable(repo_id);
 }

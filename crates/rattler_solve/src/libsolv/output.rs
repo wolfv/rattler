@@ -1,7 +1,8 @@
 //! Contains business logic to retrieve the results from libsolv after attempting to resolve a conda
 //! environment
 
-use libsolv_rs::pool::{Id, Pool};
+use libsolv_rs::pool::{Pool, RepoId};
+use libsolv_rs::solvable::SolvableId;
 use libsolv_rs::solver::{Transaction, TransactionKind};
 use rattler_conda_types::RepoDataRecord;
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 /// containing their ids.
 pub fn get_required_packages(
     pool: &Pool,
-    repo_mapping: &HashMap<Id, usize>,
+    repo_mapping: &HashMap<RepoId, usize>,
     transaction: &Transaction,
     repodata_records: &[&[RepoDataRecord]],
 ) -> Result<Vec<RepoDataRecord>, Vec<TransactionKind>> {
@@ -41,9 +42,13 @@ pub fn get_required_packages(
     Ok(required_packages)
 }
 
-fn get_solvable_indexes(pool: &Pool, repo_mapping: &HashMap<Id, usize>, id: Id) -> (usize, usize) {
+fn get_solvable_indexes(
+    pool: &Pool,
+    repo_mapping: &HashMap<RepoId, usize>,
+    id: SolvableId,
+) -> (usize, usize) {
     let solvable = pool.resolve_solvable(id);
-    let solvable_index = solvable.metadata.original_index.unwrap();
+    let solvable_index = solvable.package().metadata.original_index.unwrap();
 
     let repo_id = solvable.repo_id();
     let repo_index = repo_mapping[&repo_id];
