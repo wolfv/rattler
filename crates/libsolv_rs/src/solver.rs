@@ -1,8 +1,9 @@
 use crate::pool::{MatchSpecId, Pool};
-use crate::rules::{Rule, RuleKind};
+use crate::rules::{Literal, Rule, RuleKind};
 use crate::solvable::SolvableId;
 use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
 use crate::solve_problem::SolveProblem;
+use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
@@ -16,6 +17,14 @@ impl RuleId {
 
     fn index(self) -> usize {
         self.0 as usize
+    }
+
+    fn is_null(self) -> bool {
+        self.0 == u32::MAX
+    }
+
+    pub fn null() -> RuleId {
+        RuleId(u32::MAX)
     }
 }
 
@@ -37,15 +46,12 @@ impl Decision {
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Decided {
     solvable: SolvableId,
-    value: bool
+    value: bool,
 }
 
 impl Decided {
     fn new(solvable: SolvableId, value: bool) -> Self {
-        Self {
-            solvable,
-            value
-        }
+        Self { solvable, value }
     }
 
     fn negate(mut self) -> Self {
@@ -89,21 +95,37 @@ impl Default for Config {
     }
 }
 
-// Not sure what this is... Maybe a bitmap?
-struct Map {}
+/// Map of all available solvables
+pub(crate) struct DecisionMap {
+    /// = 0: undecided
+    /// > 0: level of decision when installed
+    /// < 0: level of decision when conflict
+    map: Vec<i64>,
+}
 
-impl Map {
-    fn with_capacity(n: usize) -> Self {
-        Map {}
+impl DecisionMap {
+    pub fn new(nsolvables: usize) -> Self {
+        Self {
+            map: vec![0; nsolvables],
+        }
+    }
+
+    pub fn set(&mut self, solvable_id: SolvableId, value: bool, level: u32) {
+        self.map[solvable_id.index()] = if value { level as i64 } else { -(level as i64) };
+    }
+
+    pub fn value(&self, solvable_id: SolvableId) -> Option<bool> {
+        match self.map[solvable_id.index()].cmp(&0) {
+            Ordering::Less => Some(false),
+            Ordering::Equal => None,
+            Ordering::Greater => Some(true),
+        }
     }
 }
 
 pub struct Solver {
     config: Config,
     pool: Pool,
-
-    // The job we are solving
-    job: VecDeque<()>,
 
     propagate_index: usize,
 
@@ -119,16 +141,7 @@ pub struct Solver {
 
     learnt_rules_start: RuleId,
 
-    recommendsmap: Map,
-    suggestsmap: Map,
-    noupdate: Map,
-
-    /// Map of all available solvables
-    ///
-    /// = 0: undecided
-    /// > 0: level of decision when installed
-    /// < 0: level of decision when conflict
-    decision_map: Vec<i64>,
+    decision_map: DecisionMap,
 
     /* list of lists of conflicting rules, < 0 for job rules */
     problems: VecDeque<()>,
@@ -157,11 +170,9 @@ impl Solver {
         // TODO: the solver is initialized with the `learnt_pool` with a single element 0: "so that 0 does not describe a proof"
 
         Solver {
-            job: VecDeque::new(),
-
             propagate_index: 0,
 
-            rules: vec![Rule::new(RuleKind::InstallRoot)],
+            rules: vec![Rule::new(RuleKind::InstallRoot, &pool)],
             watches: Vec::new(),
             rule_assertions: VecDeque::from([RuleId::new(0)]),
             decision_queue: VecDeque::new(),
@@ -170,10 +181,7 @@ impl Solver {
 
             learnt_rules_start: RuleId(0),
 
-            recommendsmap: Map::with_capacity(pool.nsolvables()),
-            suggestsmap: Map::with_capacity(pool.nsolvables()),
-            noupdate: Map::with_capacity(42),
-            decision_map: vec![0; pool.nsolvables()],
+            decision_map: DecisionMap::new(pool.nsolvables()),
             problems: VecDeque::new(),
 
             config: Config::default(),
@@ -210,68 +218,6 @@ impl Solver {
         output
     }
 
-    pub fn all_solver_problems(&self) -> Vec<SolveProblem> {
-        todo!()
-
-        // let mut problems = Vec::new();
-        // let mut problem_rules = VecDeque::<Id>::default();
-        // let count = self.problem_count();
-        // for i in 1..=count {
-        //     unsafe {
-        //         ffi::solver_findallproblemrules(
-        //             self.raw_ptr(),
-        //             i.try_into().unwrap(),
-        //             problem_rules.raw_ptr(),
-        //         )
-        //     };
-        //     for r in problem_rules.id_iter() {
-        //         if r != 0 {
-        //             let mut source_id = 0;
-        //             let mut target_id = 0;
-        //             let mut dep_id = 0;
-        //
-        //             let problem_type = unsafe {
-        //                 ffi::solver_ruleinfo(
-        //                     self.raw_ptr(),
-        //                     r,
-        //                     &mut source_id,
-        //                     &mut target_id,
-        //                     &mut dep_id,
-        //                 )
-        //             };
-        //
-        //             let pool = unsafe { (*self.0.as_ptr()).pool as *mut ffi::Pool };
-        //
-        //             let nsolvables = unsafe { (*pool).nsolvables };
-        //
-        //             let target = if target_id < 0 || target_id >= nsolvables as i32 {
-        //                 None
-        //             } else {
-        //                 Some(SolvableId(target_id))
-        //             };
-        //
-        //             let source = if source_id < 0 || source_id >= nsolvables as i32 {
-        //                 None
-        //             } else {
-        //                 Some(SolvableId(target_id))
-        //             };
-        //
-        //             let dep = if dep_id == 0 {
-        //                 None
-        //             } else {
-        //                 let dep = unsafe { ffi::pool_dep2str(pool, dep_id) };
-        //                 let dep = unsafe { CStr::from_ptr(dep) };
-        //                 let dep = dep.to_str().expect("Invalid UTF8 value").to_string();
-        //                 Some(dep)
-        //             };
-        //
-        //             problems.push(SolveProblem::from_raw(problem_type, dep, source, target));
-        //         }
-        //     }
-        // }
-        // problems
-    }
-
     /// Solves all the problems in the `queue` and returns a transaction from the found solution.
     /// Returns an error if problems remain unsolved.
     pub fn solve(&mut self, jobs: SolveJobs) -> Result<Transaction, Vec<String>> {
@@ -300,37 +246,34 @@ impl Solver {
         self.make_watches();
 
         // Create assertion index. It is only used to speed up make_rule_decisions() a bit
-        for (i, rule) in self.rules.iter().enumerate().skip(1) {
-            if rule.is_assertion(self.pool()) {
-                self.rule_assertions.push_back(RuleId::new(i));
-            }
-        }
+        // for (i, rule) in self.rules.iter().enumerate().skip(1) {
+        //     if rule.is_assertion(self.pool()) {
+        //         self.rule_assertions.push_back(RuleId::new(i));
+        //     }
+        // }
 
         // Run SAT
         self.run_sat();
 
         if self.problem_count() == 0 {
-            Ok(Transaction { steps: Vec::new() })
+            let steps = self
+                .decision_queue
+                .iter()
+                .flat_map(|d| {
+                    let decided = d.decided();
+                    if decided.value && decided.solvable != SolvableId::root() {
+                        Some((decided.solvable, TransactionKind::Install))
+                    } else {
+                        // Ignore things that are set to false
+                        None
+                    }
+                })
+                .collect();
+            Ok(Transaction { steps })
         } else {
             Err(self.solver_problems())
         }
     }
-
-    // fn add_pkg_rules_for_solvable(&mut self, solvable: SolvableId) {
-    //     let match_spec = match self.pool.resolve_solvable(solvable) {
-    //         Solvable::Package(_) => panic!("only match spec solvables generate rules (?)"),
-    //         Solvable::MatchSpec(match_spec) => match_spec.clone(),
-    //     };
-    //
-    //     let candidates = self.pool.get_candidates(&match_spec);
-    //     if candidates.is_empty() {
-    //         panic!("No candidates for match spec: {match_spec}!");
-    //     }
-    //
-    //     self.add_requires_rule(solvable, candidates);
-    //
-    //     // Add constrains when adding rules for package
-    // }
 
     fn add_rules_for_root_dep(&mut self, visited: &mut HashSet<SolvableId>, dep: MatchSpecId) {
         let mut candidate_stack = Vec::new();
@@ -350,6 +293,12 @@ impl Solver {
                     candidate_stack.push(candidate);
                 }
             }
+
+            // TODO: gracefully handle this (e.g. after the root decision, add a decision setting the SolvableId to false)
+            if candidates.is_empty() {
+                let ms = self.pool.match_specs[dep.index()].to_string();
+                panic!("No candidates for matchspec: {ms}");
+            }
         }
 
         // Process candidates, adding them recursively
@@ -358,6 +307,7 @@ impl Solver {
 
             // Requires
             for &dep in &solvable.dependencies {
+                // Ensure the candidates have their rules added
                 let dep_candidates = Pool::get_candidates(
                     &self.pool.match_specs,
                     &self.pool.strings_to_ids,
@@ -367,32 +317,51 @@ impl Solver {
                     dep,
                 );
 
-                // Create requires rule
-                self.rules
-                    .push(Rule::new(RuleKind::Requires(candidate, dep)));
-
-                // Ensure the candidates have their rules added too
                 for &dep_candidate in dep_candidates {
                     if visited.insert(dep_candidate) {
                         candidate_stack.push(dep_candidate);
                     }
                 }
+
+                // TODO: gracefully handle this (e.g. after the root decision, add a decision setting the SolvableId to false)
+                if dep_candidates.is_empty() {
+                    let ms = self.pool.match_specs[dep.index()].to_string();
+                    panic!("No candidates for matchspec: {ms}");
+                }
+
+                // Create requires rule
+                self.rules
+                    .push(Rule::new(RuleKind::Requires(candidate, dep), &self.pool));
             }
 
             // Constrains
             for &dep in &solvable.constrains {
-                self.rules
-                    .push(Rule::new(RuleKind::Constrains(candidate, dep)));
+                let dep_forbidden = Pool::get_forbidden(
+                    &self.pool.match_specs,
+                    &self.pool.strings_to_ids,
+                    &self.pool.solvables,
+                    &self.pool.packages_by_name,
+                    &mut self.pool.match_spec_to_forbidden,
+                    dep,
+                );
 
-                // It is not necessary to create rules for the packages that match a `constrains`
-                // match spec, because they are not a dependency
+                if !dep_forbidden.is_empty() {
+                    // Only add the "constrains" if it actually forbids packages
+                    self.rules
+                        .push(Rule::new(RuleKind::Constrains(candidate, dep), &self.pool));
+                }
             }
         }
+
+        self.rules.push(Rule::new(
+            RuleKind::Requires(SolvableId::root(), dep),
+            &self.pool,
+        ));
     }
 
     fn run_sat(&mut self) {
-        // This thng is true, right?
-        let disable_rules = true;
+        // This thing is normally true
+        // let disable_rules = true;
 
         // let mut decision_queue = VecDeque::new();
         let mut level = 0;
@@ -403,10 +372,10 @@ impl Solver {
         loop {
             // First rule decision
             if level == 0 {
-                match self.make_rule_decisions() {
-                    Ok(new_level) => level = new_level,
+                level = match self.install_root_solvable() {
+                    Ok(new_level) => new_level,
                     Err(_) => break,
-                }
+                };
 
                 if let Err(cause) = self.propagate(level) {
                     self.analyze_unsolvable(cause, false);
@@ -415,185 +384,174 @@ impl Solver {
 
                 root_level = level + 1;
             }
+
+            // TODO: come up with a way to know when we are done
+            return;
+
+            // Resolve deps
+            // let original_level = level;
+            // level = self.resolve_dependencies(level);
         }
     }
 
-    fn make_rule_decisions(&mut self) -> Result<u32, ()> {
+    fn install_root_solvable(&mut self) -> Result<u32, ()> {
         assert!(self.decision_queue.is_empty());
 
-        // The root solvable is installed first
-        self.decision_queue.push_back(Decision::Decided(Decided::new(SolvableId::root(), true)));
+        self.decision_queue
+            .push_back(Decision::Decided(Decided::new(SolvableId::root(), true)));
         self.decision_queue_why.push_back(RuleId::new(0));
+
+        // TODO: why do we push twice here?
         self.decision_queue_reason.push_back(0);
         self.decision_queue_reason.push_back(0);
-        self.decision_map[SolvableId::root().index()] = 1; // Installed at level 1
 
-        let mut have_disabled = false;
-
-        let decision_start = 1;
-        loop {
-            // If we needed to re-run, back up decisions to decision_start
-            while self.decision_queue.len() > decision_start {
-                let decision = self.decision_queue.pop_back().unwrap();
-                self.decision_queue_why.pop_back();
-
-                // Decision becomes undecided
-                self.decision_map[decision.decided().index()] = 0;
-            }
-
-            let mut visited_assertions = 0;
-            for &rule_id in &self.rule_assertions {
-                visited_assertions += 1;
-
-                let rule = &mut self.rules[rule_id.index()];
-
-                if have_disabled && rule_id >= self.learnt_rules_start {
-                    // Just started with learnt rule assertions. If we have disabled some rules,
-                    // adapt the learnt rule status
-                    Solver::enable_disable_learnt_rules();
-                    have_disabled = false;
-                }
-
-                if !rule.enabled {
-                    continue;
-                }
-
-                let Some((solvable, asserted_value)) = rule.assertion(&self.pool) else {
-                    // The rule is not an assertion
-                    continue;
-                };
-
-                let decision = self.decision_map[solvable.index()];
-                if decision == 0 {
-                    // Not yet decided
-                    self.decision_queue.push_back(Decision::Undecided);
-                    self.decision_queue_why.push_back(rule_id);
-                    self.decision_map[solvable.index()] = -1;
-                    continue;
-                }
-
-                if asserted_value && decision > 0 {
-                    // OK to install
-                    continue;
-                }
-
-                if !asserted_value && decision < 0 {
-                    // OK to not install
-                    continue;
-                }
-
-                /*
-                 * found a conflict!
-                 *
-                 * The rule we're currently processing says something
-                 * different than a previous decision
-                 * on this literal
-                 */
-
-                if rule_id >= self.learnt_rules_start {
-                    /* conflict with a learnt rule */
-                    /* can happen when packages cannot be installed for multiple reasons. */
-                    /* we disable the learnt rule in this case */
-                    /* (XXX: we should really do something like analyze_unsolvable_rule here!) */
-                    Solver::disable_rule(rule_id);
-                    continue;
-                }
-
-                // Find the decision which is opposite of the rule
-                // let opposite_decision = Decision::Decided(solvable, !asserted_value);
-                // let i = self
-                //     .decision_queue
-                //     .iter()
-                //     .position(|&decision| decision == opposite_decision)
-                //     .unwrap();
-                // let conflicting_rule = if solvable == SolvableId::root() {
-                //     RuleId::new(0)
-                // } else {
-                //     let ori = self.decision_queue_why[i];
-                //     assert!(ori.index() > 0);
-                //     ori
-                // };
-
-                Solver::record_problem(rule_id);
-
-                // Skipped: record proof
-
-                // Disable all problem rules
-                // solver_disableproblemset(solv, oldproblemcount);
-                have_disabled = true;
-                break;
-            }
-
-            if visited_assertions == self.rule_assertions.len() {
-                break
-            } else {
-                continue
-            }
-        }
+        self.decision_map.set(SolvableId::root(), true, 1);
 
         Ok(1)
     }
 
-    fn propagate(&mut self, _level: u32) -> Result<(), Rule> {
-        for decision in self.decision_queue.iter().skip(self.propagate_index) {
+    fn resolve_dependencies(&mut self, level: u32) -> u32 {
+        // Get the next undecided dependency and decide it to the highest possible version that doesn't cause a conflict
+        todo!()
+    }
+
+    fn propagate(&mut self, level: u32) -> Result<(), Rule> {
+        while let Some(decision) = self.decision_queue.range(self.propagate_index..).next() {
             self.propagate_index += 1;
 
-            // TODO: what about undecided packages in the queue?
-            /*
-               * 'pkg' was just decided
-               * negate because our watches trigger if literal goes FALSE
-               */
-            let pkg = decision.decided().negate();
+            let pkg = decision.decided().solvable;
 
-            // Foreach rule where 'pkg' is now FALSE
+            // Iterate through the linked list of rules that watch this solvable
+            let mut prev_rule_id: Option<RuleId> = None;
             let mut rule_id = self.watches[self.pool.solvables.len() + pkg.index()];
-            loop {
-                if rule_id.index() == 0 {
-                    break;
+            while !rule_id.is_null() {
+                if prev_rule_id == Some(rule_id) {
+                    panic!("Linked list is circular!");
                 }
 
-                let rule = &self.rules[rule_id.index()];
-                if !rule.enabled {
-                    // rule is disabled, goto next
-                    if pkg.solvable == rule.solvable_id() {
-                        rule_id = rule.n1;
+                // This is a convoluted way of getting mutable access to the current and the previous rule
+                let (prev_rule, rule) = if let Some(prev_rule_id) = prev_rule_id {
+                    if prev_rule_id < rule_id {
+                        let (prev, current) = self.rules.split_at_mut(rule_id.index());
+                        (Some(&mut prev[prev_rule_id.index()]), &mut current[0])
                     } else {
-                        rule_id = rule.n2;
+                        let (current, prev) = self.rules.split_at_mut(prev_rule_id.index());
+                        (Some(&mut prev[0]), &mut current[rule_id.index()])
                     }
-
-                    continue;
-                }
-
-                /*
-                * 'pkg' was just decided, so this rule may now be unit.
-	            */
-                /* find the other watch */
-                let Some((rule_solvable, rule_candidate)) = rule.solvable_and_candidate(&self.pool) else {
-                    panic!("fingers crossed that this is unreachable?")
-                };
-
-                let (other_watch, next_rp) = if pkg.solvable == rule_solvable {
-                    // Keep the watch on the candidate, advance the watch on the solvable
-                    (rule_candidate, rule.n1)
                 } else {
-                    // Keep the watch on the solvable, advance the watch on the candidate
-                    (rule_solvable, rule.n2)
+                    (None, &mut self.rules[rule_id.index()])
                 };
 
-                /*
-                   * if the other watch is true we have nothing to do
-                   */
-                let value_from_map = self.decision_map[other_watch.index()] > 0;
-                if value_from_map {
+                // Update the prev_rule_id for the next run
+                prev_rule_id = Some(rule_id);
+
+                // Configure the next rule to visit
+                let this_rule_id = rule_id;
+                if pkg == rule.w1 {
+                    rule_id = rule.n1;
+                } else {
+                    rule_id = rule.n2;
+                }
+
+                // Skip disabled rules
+                if !rule.enabled {
                     continue;
                 }
 
-                /*
-                   * The other literal is FALSE or UNDEF
-                   *
-                   */
+                // TODO: The code below is duplicated for the w1 and w2 case, we should deduplicate it
+                let (w1, w2) = rule.watched_literals();
+                if pkg == w1.solvable_id && w1.eval(&self.decision_map) == Some(false) {
+                    // The first literal is now false!
+                    if let Some(variable) =
+                        rule.next_unwatched_variable(&self.pool, &self.decision_map)
+                    {
+                        rule.w1 = variable;
 
-                // TODO: continue
+                        // Remove this rule from its current place in the linked list
+                        if let Some(prev_rule) = prev_rule {
+                            // Modify the previous rule
+                            if prev_rule.n1 == this_rule_id {
+                                prev_rule.n1 = rule.n1;
+                            } else {
+                                prev_rule.n2 = rule.n1;
+                            }
+                        } else {
+                            // This is the first rule in the chain
+                            self.watches[pkg.index()] = rule.n1;
+                        }
+
+                        // Add it to its new place
+                        rule.n1 = self.watches[variable.index()];
+                        self.watches[variable.index()] = this_rule_id;
+
+                        continue;
+                    } else {
+                        // There are no terms left to watch, so the clause is now a unit clause
+
+                        if w2.eval(&self.decision_map) == Some(false) {
+                            // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
+                            return Err(rule.clone());
+                        }
+
+                        self.decision_map
+                            .set(w2.solvable_id, w2.satisfying_value(), level);
+                        self.decision_queue
+                            .push_back(Decision::Decided(Decided::new(
+                                w2.solvable_id,
+                                w2.satisfying_value(),
+                            )));
+                        self.decision_queue_why.push_back(this_rule_id);
+
+                        continue;
+                    }
+                } else if pkg == w2.solvable_id && w2.eval(&self.decision_map) == Some(false) {
+                    // The second literal is now false!
+                    if let Some(variable) =
+                        rule.next_unwatched_variable(&self.pool, &self.decision_map)
+                    {
+                        rule.w2 = variable;
+
+                        // Remove this rule from its current place in the linked list
+                        if let Some(prev_rule) = prev_rule {
+                            // Modify the previous rule
+                            if prev_rule.n1 == this_rule_id {
+                                prev_rule.n1 = rule.n2;
+                            } else {
+                                prev_rule.n2 = rule.n2;
+                            }
+                        } else {
+                            // This is the first rule in the chain
+                            self.watches[pkg.index()] = rule.n2;
+                        }
+
+                        // Add it to its new place
+                        rule.n2 = self.watches[variable.index()];
+                        self.watches[variable.index()] = this_rule_id;
+
+                        continue;
+                    } else {
+                        // There are no terms left to watch, so the clause is now a unit clause
+
+                        if w1.eval(&self.decision_map) == Some(false) {
+                            // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
+                            return Err(rule.clone());
+                        }
+
+                        self.decision_map
+                            .set(w1.solvable_id, w1.satisfying_value(), level);
+                        self.decision_queue
+                            .push_back(Decision::Decided(Decided::new(
+                                w1.solvable_id,
+                                w1.satisfying_value(),
+                            )));
+                        self.decision_queue_why.push_back(this_rule_id);
+
+                        continue;
+                    }
+                } else {
+                    // Both watched literals are still true in this rule
+                    continue;
+                }
             }
         }
 
@@ -604,34 +562,111 @@ impl Solver {
         todo!()
     }
 
-    fn enable_disable_learnt_rules() {
-        // See enabledisablelearntrules
-    }
-
-    fn disable_rule(_rule_id: RuleId) {}
-
-    fn record_problem(_rule_id: RuleId) {
-        // See solver_recordproblem
-        // TODO: this is only for error reporting, I assume?
-    }
-
     fn make_watches(&mut self) {
         // Lower half for removals, upper half for installs
-        self.watches = vec![RuleId::new(0); self.pool.solvables.len() * 2];
+        self.watches = vec![RuleId::null(); self.pool.solvables.len() * 2];
 
+        // Watches are already initialized in the rules themselves, here we initialize the linked list
         for (i, rule) in self.rules.iter_mut().enumerate().skip(1).rev() {
-            // Watches are only created for rules with candidates, not for assertions
-            if let Some((solvable_id, first_candidate_id)) =
-                rule.solvable_and_candidate(&self.pool)
-            {
-                let solvable_watch_index = self.pool.solvables.len() + solvable_id.index();
-                rule.n1 = RuleId::new(0);
-                self.watches[solvable_watch_index] = RuleId::new(i);
+            if !rule.has_watches() {
+                // Skip rules without watches
+                continue;
+            }
 
-                let candidate_watch_index = self.pool.solvables.len() + first_candidate_id.index();
-                rule.n2 = RuleId::new(0);
-                self.watches[candidate_watch_index] = RuleId::new(i);
+            let w1_solvable_index = self.pool.solvables.len() + rule.w1.index();
+            rule.n1 = self.watches[w1_solvable_index];
+            self.watches[w1_solvable_index] = RuleId::new(i);
+
+            let w2_solvable_index = self.pool.solvables.len() + rule.w2.index();
+            rule.n2 = self.watches[w2_solvable_index];
+            self.watches[w2_solvable_index] = RuleId::new(i);
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::solvable::Solvable;
+    use rattler_conda_types::{PackageRecord, Version};
+
+    fn pool(packages: &[(&str, &str, Vec<&str>)]) -> Pool {
+        let mut pool = Pool::new();
+        let repo_id = pool.new_repo("");
+
+        for (pkg_name, version, deps) in packages {
+            let pkg_name = *pkg_name;
+            let version = *version;
+            let record = Box::new(PackageRecord {
+                arch: None,
+                build: "".to_string(),
+                build_number: 0,
+                constrains: vec![],
+                depends: deps.iter().map(|s| s.to_string()).collect(),
+                features: None,
+                legacy_bz2_md5: None,
+                legacy_bz2_size: None,
+                license: None,
+                license_family: None,
+                md5: None,
+                name: pkg_name.to_string(),
+                noarch: Default::default(),
+                platform: None,
+                sha256: None,
+                size: None,
+                subdir: "".to_string(),
+                timestamp: None,
+                track_features: vec![],
+                version: version.parse().unwrap(),
+            });
+
+            let solvable_id = pool.add_package(repo_id, Box::leak(record));
+
+            for &dep in deps {
+                pool.add_dependency(solvable_id, dep.to_string());
             }
         }
+
+        pool
+    }
+
+    #[test]
+    fn test_unit_propagation_1() {
+        let pool = pool(&[("asdf", "1.2.3", vec![])]);
+        let mut solver = Solver::create(pool);
+
+        let mut jobs = SolveJobs::default();
+        jobs.install("asdf".parse().unwrap());
+        let solved = solver.solve(jobs).unwrap();
+
+        assert_eq!(solved.steps.len(), 1);
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "asdf");
+        assert_eq!(solvable.record.version.to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn test_unit_propagation_nested() {
+        let pool = pool(&[
+            ("asdf", "1.2.3", vec!["efgh"]),
+            ("efgh", "4.5.6", vec![]),
+            ("dummy", "42.42.42", vec![]),
+        ]);
+        let mut solver = Solver::create(pool);
+
+        let mut jobs = SolveJobs::default();
+        jobs.install("asdf".parse().unwrap());
+        let solved = solver.solve(jobs).unwrap();
+
+        assert_eq!(solved.steps.len(), 2);
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "asdf");
+        assert_eq!(solvable.record.version.to_string(), "1.2.3");
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
+        assert_eq!(solvable.record.name, "efgh");
+        assert_eq!(solvable.record.version.to_string(), "4.5.6");
     }
 }

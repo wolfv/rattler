@@ -13,6 +13,14 @@ impl SolvableId {
         Self(0)
     }
 
+    pub fn null() -> Self {
+        Self(u32::MAX)
+    }
+
+    pub fn is_null(self) -> bool {
+        self.0 == u32::MAX
+    }
+
     pub fn index(self) -> usize {
         self.0 as usize
     }
@@ -25,13 +33,11 @@ pub enum Solvable {
 
 pub struct PackageSolvable {
     pub(crate) repo_id: RepoId,
-    // TODO: it might be unnecessary to keep dependencies and constrains stored, since they are only
-    // needed when generating rules
     pub(crate) dependencies: Vec<MatchSpecId>,
     pub(crate) constrains: Vec<MatchSpecId>,
     pub(crate) record: &'static PackageRecord,
     pub(crate) name: StringId,
-    pub evr: StringId,
+    pub version: StringId,
     pub metadata: SolvableMetadata,
 }
 
@@ -41,14 +47,19 @@ pub struct SolvableMetadata {
 }
 
 impl Solvable {
-    pub fn new(repo_id: RepoId, name: StringId, record: &'static PackageRecord) -> Self {
+    pub fn new(
+        repo_id: RepoId,
+        name: StringId,
+        version: StringId,
+        record: &'static PackageRecord,
+    ) -> Self {
         Solvable::Package(PackageSolvable {
             repo_id,
             record,
             name,
+            version,
             dependencies: Vec::new(),
             constrains: Vec::new(),
-            evr: StringId::max(),
             metadata: SolvableMetadata::default(),
         })
     }

@@ -71,6 +71,8 @@ pub struct Pool {
     /// Cached candidates for each match spec, indexed by their MatchSpecId
     pub(crate) match_spec_to_candidates: Vec<Option<Vec<SolvableId>>>,
 
+    pub(crate) match_spec_to_forbidden: Vec<Option<Vec<SolvableId>>>,
+
     // TODO: eventually we could turn this into a Vec, making sure we have a separate interning
     // scheme for package names
     pub(crate) packages_by_name: HashMap<StringId, Vec<SolvableId>>,
@@ -92,6 +94,7 @@ impl Pool {
             match_specs_to_ids: HashMap::default(),
             match_specs: Vec::new(),
             match_spec_to_candidates: Vec::new(),
+            match_spec_to_forbidden: Vec::new(),
         }
     }
 
@@ -102,14 +105,13 @@ impl Pool {
     }
 
     /// Adds a new solvable to a repo
-    pub fn add_package(
-        &mut self,
-        repo_id: RepoId,
-        name: StringId,
-        record: &'static PackageRecord,
-    ) -> SolvableId {
+    pub fn add_package(&mut self, repo_id: RepoId, record: &'static PackageRecord) -> SolvableId {
+        let name = self.intern_str(&record.name);
+        let version = self.intern_str(record.version.to_string());
+
         let solvable_id = SolvableId::new(self.solvables.len());
-        self.solvables.push(Solvable::new(repo_id, name, record));
+        self.solvables
+            .push(Solvable::new(repo_id, name, version, record));
 
         assert!(repo_id.0 < self.total_repos);
 
@@ -143,10 +145,11 @@ impl Pool {
         &mut self,
         repo_id: RepoId,
         solvable_id: SolvableId,
-        name: StringId,
         record: &'static PackageRecord,
     ) {
-        self.solvables[solvable_id.index()] = Solvable::new(repo_id, name, record);
+        let name = self.intern_str(&record.name);
+        let version = self.intern_str(&record.version.to_string());
+        self.solvables[solvable_id.index()] = Solvable::new(repo_id, name, version, record);
     }
 
     // This function does not take `self`, because otherwise we run into problems with borrowing
@@ -174,6 +177,39 @@ impl Pool {
                 .iter()
                 .cloned()
                 .filter(|solvable| match_spec.matches(solvables[solvable.index()].package().record))
+                .collect()
+        });
+
+        candidates.as_slice()
+    }
+
+    // This function does not take `self`, because otherwise we run into problems with borrowing
+    // when we want to use it together with other pool functions
+    pub fn get_forbidden<'a>(
+        match_specs: &'a [MatchSpec],
+        strings_to_ids: &'a HashMap<String, StringId>,
+        solvables: &'a [Solvable],
+        packages_by_name: &'a HashMap<StringId, Vec<SolvableId>>,
+        match_spec_to_forbidden: &'a mut [Option<Vec<SolvableId>>],
+        match_spec_id: MatchSpecId,
+    ) -> &'a [SolvableId] {
+        let candidates = match_spec_to_forbidden[match_spec_id.index()].get_or_insert_with(|| {
+            let match_spec = &match_specs[match_spec_id.index()];
+            let match_spec_name = match_spec
+                .name
+                .as_deref()
+                .expect("match spec without name!");
+            let name_id = match strings_to_ids.get(match_spec_name) {
+                None => return Vec::new(),
+                Some(name_id) => name_id,
+            };
+
+            packages_by_name[&name_id]
+                .iter()
+                .cloned()
+                .filter(|solvable| {
+                    !match_spec.matches(solvables[solvable.index()].package().record)
+                })
                 .collect()
         });
 
@@ -219,6 +255,10 @@ impl Pool {
     /// Finds a previously interned string or returns `None` if it wasn't found
     pub fn find_interned_str<T: AsRef<str>>(&self, str: T) -> Option<StringId> {
         self.strings_to_ids.get(str.as_ref()).cloned()
+    }
+
+    pub fn resolve_string(&self, string_id: StringId) -> &str {
+        &self.strings[&string_id]
     }
 
     /// Returns a string describing the last error associated to this pool, or "no error" if there

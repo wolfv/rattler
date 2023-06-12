@@ -37,10 +37,6 @@ pub fn add_repodata_records(
 
         let record = &repo_data.package_record;
 
-        // Version
-        let evr = pool.intern_str(record.version.to_string()).into();
-        pool.resolve_solvable_mut(solvable_id).package_mut().evr = evr;
-
         // Dependencies
         for match_spec in record.depends.iter() {
             pool.add_dependency(solvable_id, match_spec.to_string());
@@ -68,8 +64,6 @@ fn add_or_reuse_solvable<'a>(
     package_to_type: &mut HashMap<&'a str, (ArchiveType, SolvableId)>,
     repo_data: &'a RepoDataRecord,
 ) -> Option<SolvableId> {
-    let name = pool.intern_str(repo_data.package_record.name.to_string());
-
     // Sometimes we can reuse an existing solvable
     if let Some((filename, archive_type)) = ArchiveType::split_str(&repo_data.file_name) {
         let record_ptr = &repo_data.package_record as *const _;
@@ -89,7 +83,7 @@ fn add_or_reuse_solvable<'a>(
                     package_to_type.insert(filename, (archive_type, old_solvable_id));
 
                     // Reset and reuse the old solvable
-                    pool.reset_package(repo_id, old_solvable_id, name, unsafe { &*record_ptr });
+                    pool.reset_package(repo_id, old_solvable_id, unsafe { &*record_ptr });
                     return Some(old_solvable_id);
                 }
                 Ordering::Equal => {
@@ -97,7 +91,7 @@ fn add_or_reuse_solvable<'a>(
                 }
             }
         } else {
-            let solvable_id = pool.add_package(repo_id, name, unsafe { &*record_ptr });
+            let solvable_id = pool.add_package(repo_id, unsafe { &*record_ptr });
             package_to_type.insert(filename, (archive_type, solvable_id));
             return Some(solvable_id);
         }
@@ -106,7 +100,7 @@ fn add_or_reuse_solvable<'a>(
     }
 
     let record_ptr = &repo_data.package_record as *const _;
-    let solvable_id = pool.add_package(repo_id, name, unsafe { &*record_ptr });
+    let solvable_id = pool.add_package(repo_id, unsafe { &*record_ptr });
     Some(solvable_id)
 }
 
@@ -139,14 +133,6 @@ pub fn add_virtual_packages(pool: &mut Pool, repo_id: RepoId, packages: &[Generi
         .leak();
 
     for package in packages {
-        let name = pool.intern_str(package.name.as_str()).into();
-        let evr = pool.intern_str(package.version.to_string()).into();
-
-        // Create a solvable for the package
-        let solvable_id = pool.add_package(repo_id, name, &package);
-        let solvable = pool.resolve_solvable_mut(solvable_id).package_mut();
-
-        // Version
-        solvable.evr = evr;
+        pool.add_package(repo_id, &package);
     }
 }
