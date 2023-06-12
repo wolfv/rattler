@@ -9,7 +9,7 @@ pub(crate) struct Rule {
     pub w2: SolvableId,
     pub n1: RuleId,
     pub n2: RuleId,
-    kind: RuleKind,
+    pub kind: RuleKind,
 }
 
 impl Rule {

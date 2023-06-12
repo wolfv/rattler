@@ -385,12 +385,12 @@ impl Solver {
                 root_level = level + 1;
             }
 
+            // Resolve deps
+            let original_level = level;
+            level = self.resolve_dependencies(level);
+
             // TODO: come up with a way to know when we are done
             return;
-
-            // Resolve deps
-            // let original_level = level;
-            // level = self.resolve_dependencies(level);
         }
     }
 
@@ -410,12 +410,93 @@ impl Solver {
         Ok(1)
     }
 
-    fn resolve_dependencies(&mut self, level: u32) -> u32 {
-        // Get the next undecided dependency and decide it to the highest possible version that doesn't cause a conflict
-        todo!()
+    /// Resolves all dependencies
+    ///
+    /// TODO: what does this thing return?
+    fn resolve_dependencies(&mut self, mut level: u32) -> u32 {
+        let mut i = 0;
+        loop {
+            if i >= self.rules.len() {
+                break;
+            }
+
+            let candidate = {
+                let rule = &self.rules[i];
+                i += 1;
+
+                if !rule.enabled {
+                    continue;
+                }
+
+                // We are only interested in requires rules
+                let RuleKind::Requires(solvable_id, deps) = rule.kind else {
+                    continue;
+                };
+
+                // Consider only rules in which we have decided to install the solvable
+                if self.decision_map.value(solvable_id) != Some(true) {
+                    continue;
+                }
+
+                // Consider only rules in which no candidates have been installed
+                let candidates = self.pool.match_spec_to_candidates[deps.index()].as_deref().unwrap();
+                if candidates.iter().any(|&c| self.decision_map.value(c) == Some(true)) {
+                    continue;
+                }
+
+                // Get the first candidate that is undecided and should be installed
+                //
+                // This assumes that the packages have been provided in the right order when the solvables were created
+                // (most recent packages first)
+                candidates.iter().cloned().find(|&c| self.decision_map.value(c).is_none()).unwrap()
+            };
+
+            // Assumption: there are multiple candidates, otherwise this would have already been handled
+            // by unit propagation
+            let orig_level = level;
+            self.create_branch();
+            level = self.set_propagate_learn(level, candidate, true, RuleId::new(i));
+
+            if level < orig_level {
+                return level;
+            }
+
+            // We have made progress, and should look at all rules in the next iteration
+            i = 0;
+        }
+
+        // We just went through all rules and there are no choices left to be made
+        level
     }
 
-    fn propagate(&mut self, level: u32) -> Result<(), Rule> {
+    fn set_propagate_learn(&mut self, mut level: u32, solvable: SolvableId, disable_rules: bool, rule_id: RuleId) -> u32 {
+        level += 1;
+        self.decision_map.set(solvable, true, level);
+        self.decision_queue.push_back(Decision::Decided(Decided::new(solvable, true)));
+        self.decision_queue_why.push_back(rule_id);
+
+        loop {
+            let r = self.propagate(level);
+            let Err(rule_id) = r else {
+                // Propagation succeeded
+                break;
+            };
+
+            if level == 1 {
+                return self.analyze_unsolvable(rule_id, disable_rules);
+            }
+
+            todo!()
+        }
+
+        level
+    }
+
+    fn create_branch(&mut self) {
+        // TODO: we should probably keep info here for backtracking
+    }
+
+    fn propagate(&mut self, level: u32) -> Result<(), RuleId> {
         while let Some(decision) = self.decision_queue.range(self.propagate_index..).next() {
             self.propagate_index += 1;
 
@@ -490,7 +571,7 @@ impl Solver {
 
                         if w2.eval(&self.decision_map) == Some(false) {
                             // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
-                            return Err(rule.clone());
+                            return Err(this_rule_id);
                         }
 
                         self.decision_map
@@ -534,7 +615,7 @@ impl Solver {
 
                         if w1.eval(&self.decision_map) == Some(false) {
                             // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
-                            return Err(rule.clone());
+                            return Err(this_rule_id);
                         }
 
                         self.decision_map
@@ -558,7 +639,7 @@ impl Solver {
         Ok(())
     }
 
-    fn analyze_unsolvable(&mut self, _rule: Rule, _disable_rules: bool) -> u32 {
+    fn analyze_unsolvable(&mut self, _rule: RuleId, _disable_rules: bool) -> u32 {
         todo!()
     }
 
@@ -630,14 +711,19 @@ mod test {
         pool
     }
 
+    fn install(packages: &[&str]) -> SolveJobs {
+        let mut jobs = SolveJobs::default();
+        for &p in packages {
+            jobs.install(p.parse().unwrap());
+        }
+        jobs
+    }
+
     #[test]
     fn test_unit_propagation_1() {
         let pool = pool(&[("asdf", "1.2.3", vec![])]);
         let mut solver = Solver::create(pool);
-
-        let mut jobs = SolveJobs::default();
-        jobs.install("asdf".parse().unwrap());
-        let solved = solver.solve(jobs).unwrap();
+        let solved = solver.solve(install(&["asdf"])).unwrap();
 
         assert_eq!(solved.steps.len(), 1);
 
@@ -654,10 +740,29 @@ mod test {
             ("dummy", "42.42.42", vec![]),
         ]);
         let mut solver = Solver::create(pool);
+        let solved = solver.solve(install(&["asdf"])).unwrap();
 
-        let mut jobs = SolveJobs::default();
-        jobs.install("asdf".parse().unwrap());
-        let solved = solver.solve(jobs).unwrap();
+        assert_eq!(solved.steps.len(), 2);
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "asdf");
+        assert_eq!(solvable.record.version.to_string(), "1.2.3");
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
+        assert_eq!(solvable.record.name, "efgh");
+        assert_eq!(solvable.record.version.to_string(), "4.5.6");
+    }
+
+    #[test]
+    fn test_resolve_dependencies() {
+        let pool = pool(&[
+            ("asdf", "1.2.3", vec![]),
+            ("asdf", "1.2.4", vec![]),
+            ("efgh", "4.5.6", vec![]),
+            ("efgh", "4.5.7", vec![]),
+        ]);
+        let mut solver = Solver::create(pool);
+        let solved = solver.solve(install(&["asdf", "efgh"])).unwrap();
 
         assert_eq!(solved.steps.len(), 2);
 
