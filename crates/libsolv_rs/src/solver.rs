@@ -1,10 +1,11 @@
-use crate::pool::{MatchSpecId, Pool};
+use crate::pool::{MatchSpecId, Pool, StringId};
 use crate::rules::{Literal, Rule, RuleKind};
-use crate::solvable::SolvableId;
+use crate::solvable::{Solvable, SolvableId};
 use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
 use crate::solve_problem::SolveProblem;
 use std::cmp::Ordering;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::hash_map::Entry;
 use std::fmt::{Display, Formatter};
 
 #[derive(Copy, Clone, PartialOrd, Ord, Eq, PartialEq)]
@@ -142,6 +143,8 @@ pub struct Solver {
     learnt_rules_start: RuleId,
 
     decision_map: DecisionMap,
+    installed_by_name: HashMap<StringId, SolvableId>,
+    name_rules: HashMap<StringId, RuleId>,
 
     /* list of lists of conflicting rules, < 0 for job rules */
     problems: VecDeque<()>,
@@ -166,10 +169,8 @@ pub mod flags {
 
 impl Solver {
     /// Create a solver, using the provided pool
-    pub fn create(pool: Pool) -> Self {
-        // TODO: the solver is initialized with the `learnt_pool` with a single element 0: "so that 0 does not describe a proof"
-
-        Solver {
+    pub fn new(pool: Pool) -> Self {
+        Self {
             propagate_index: 0,
 
             rules: vec![Rule::new(RuleKind::InstallRoot, &pool)],
@@ -182,6 +183,8 @@ impl Solver {
             learnt_rules_start: RuleId(0),
 
             decision_map: DecisionMap::new(pool.nsolvables()),
+            installed_by_name: HashMap::default(),
+            name_rules: HashMap::default(),
             problems: VecDeque::new(),
 
             config: Config::default(),
@@ -237,6 +240,14 @@ impl Solver {
             } else {
                 panic!("Unsupported operation or candidate source")
             }
+        }
+
+        // Initialize rules ensuring only a single candidate per package name is installed
+        for (name_id, _) in &self.pool.packages_by_name {
+            let &name_id = name_id;
+            let rule_id = RuleId::new(self.rules.len());
+            self.rules.push(Rule::new(RuleKind::SameName(name_id), &self.pool));
+            self.name_rules.insert(name_id, rule_id);
         }
 
         // All new rules are learnt after this point
@@ -470,6 +481,11 @@ impl Solver {
     }
 
     fn set_propagate_learn(&mut self, mut level: u32, solvable: SolvableId, disable_rules: bool, rule_id: RuleId) -> u32 {
+        let s = self.pool.resolve_solvable(solvable).package();
+        let name = self.pool.resolve_string(s.name);
+        let version = self.pool.resolve_string(s.version);
+        println!("Attempting to install {name} {version}");
+
         level += 1;
         self.decision_map.set(solvable, true, level);
         self.decision_queue.push_back(Decision::Decided(Decided::new(solvable, true)));
@@ -486,7 +502,13 @@ impl Solver {
                 return self.analyze_unsolvable(rule_id, disable_rules);
             }
 
-            todo!()
+            let (new_level, learned_rule_id, literal) = self.analyze(rule_id);
+            level = new_level;
+
+            let decision = literal.satisfying_value();
+            self.decision_map.set(literal.solvable_id, decision, level);
+            self.decision_queue.push_back(Decision::Decided(Decided::new(literal.solvable_id, decision)));
+            self.decision_queue_why.push_back(learned_rule_id);
         }
 
         level
@@ -501,6 +523,14 @@ impl Solver {
             self.propagate_index += 1;
 
             let pkg = decision.decided().solvable;
+
+            // Ensure the package is only installed once
+            if let Solvable::Package(solvable) = self.pool.resolve_solvable(pkg) {
+                match self.installed_by_name.entry(solvable.name) {
+                    Entry::Occupied(_) => return Err(self.name_rules[&solvable.name]),
+                    Entry::Vacant(e) => e.insert(pkg),
+                };
+            }
 
             // Iterate through the linked list of rules that watch this solvable
             let mut prev_rule_id: Option<RuleId> = None;
@@ -643,6 +673,10 @@ impl Solver {
         todo!()
     }
 
+    fn analyze(&mut self, rule_id: RuleId) -> (u32, RuleId, Literal) {
+        todo!()
+    }
+
     fn make_watches(&mut self) {
         // Lower half for removals, upper half for installs
         self.watches = vec![RuleId::null(); self.pool.solvables.len() * 2];
@@ -722,7 +756,7 @@ mod test {
     #[test]
     fn test_unit_propagation_1() {
         let pool = pool(&[("asdf", "1.2.3", vec![])]);
-        let mut solver = Solver::create(pool);
+        let mut solver = Solver::new(pool);
         let solved = solver.solve(install(&["asdf"])).unwrap();
 
         assert_eq!(solved.steps.len(), 1);
@@ -739,7 +773,7 @@ mod test {
             ("efgh", "4.5.6", vec![]),
             ("dummy", "42.42.42", vec![]),
         ]);
-        let mut solver = Solver::create(pool);
+        let mut solver = Solver::new(pool);
         let solved = solver.solve(install(&["asdf"])).unwrap();
 
         assert_eq!(solved.steps.len(), 2);
@@ -756,15 +790,46 @@ mod test {
     #[test]
     fn test_resolve_dependencies() {
         let pool = pool(&[
-            ("asdf", "1.2.3", vec![]),
             ("asdf", "1.2.4", vec![]),
-            ("efgh", "4.5.6", vec![]),
+            ("asdf", "1.2.3", vec![]),
             ("efgh", "4.5.7", vec![]),
+            ("efgh", "4.5.6", vec![]),
         ]);
-        let mut solver = Solver::create(pool);
+        let mut solver = Solver::new(pool);
         let solved = solver.solve(install(&["asdf", "efgh"])).unwrap();
 
         assert_eq!(solved.steps.len(), 2);
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "asdf");
+        assert_eq!(solvable.record.version.to_string(), "1.2.4");
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
+        assert_eq!(solvable.record.name, "efgh");
+        assert_eq!(solvable.record.version.to_string(), "4.5.7");
+    }
+
+    #[test]
+    fn test_resolve_with_conflict() {
+        let pool = pool(&[
+            ("asdf", "1.2.4", vec!["conflicting=1.0.1"]),
+            ("asdf", "1.2.3", vec!["conflicting=1.0.0"]),
+            ("efgh", "4.5.7", vec!["conflicting=1.0.0"]),
+            ("efgh", "4.5.6", vec!["conflicting=1.0.0"]),
+            ("conflicting", "1.0.1", vec![]),
+            ("conflicting", "1.0.0", vec![]),
+        ]);
+        let mut solver = Solver::new(pool);
+        let solved = solver.solve(install(&["asdf", "efgh"])).unwrap();
+
+        for &(solvable_id, _) in &solved.steps {
+            let solvable = solver.pool().resolve_solvable(solvable_id).package();
+            let name = solver.pool().resolve_string(solvable.name);
+            let version = solver.pool().resolve_string(solvable.version);
+            println!("Install {name} {version}");
+        }
+
+        assert_eq!(solved.steps.len(), 3);
 
         let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
         assert_eq!(solvable.record.name, "asdf");
@@ -772,6 +837,10 @@ mod test {
 
         let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
         assert_eq!(solvable.record.name, "efgh");
-        assert_eq!(solvable.record.version.to_string(), "4.5.6");
+        assert_eq!(solvable.record.version.to_string(), "4.5.7");
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
+        assert_eq!(solvable.record.name, "conflicting");
+        assert_eq!(solvable.record.version.to_string(), "1.0.0");
     }
 }

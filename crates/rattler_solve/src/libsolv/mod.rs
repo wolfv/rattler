@@ -103,7 +103,7 @@ impl SolverBackend for LibsolvBackend {
         }
 
         // Construct a solver and solve the problems in the queue
-        let mut solver = Solver::create(pool);
+        let mut solver = Solver::new(pool);
         let cfg = solver.config_mut();
         cfg.allow_uninstall = true;
         cfg.allow_downgrade = true;

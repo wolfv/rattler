@@ -1,4 +1,4 @@
-use crate::pool::{MatchSpecId, Pool};
+use crate::pool::{MatchSpecId, Pool, StringId};
 use crate::solvable::SolvableId;
 use crate::solver::{DecisionMap, RuleId};
 
@@ -35,6 +35,8 @@ impl Rule {
     pub fn watched_literals(&self) -> (Literal, Literal) {
         match self.kind {
             RuleKind::InstallRoot => unreachable!(),
+            RuleKind::SameName(_) => unreachable!(),
+            RuleKind::Unit(_) => unreachable!(),
             RuleKind::Requires(solvable_id, _) => {
                 if self.w1 == solvable_id {
                     (
@@ -100,6 +102,8 @@ impl Rule {
 
         match self.kind {
             RuleKind::InstallRoot => unreachable!(),
+            RuleKind::SameName(_) => unreachable!(),
+            RuleKind::Unit(_) => None,
             RuleKind::Requires(solvable_id, match_spec_id) => {
                 // The solvable that added this rule
                 let solvable_lit = Literal {
@@ -187,14 +191,22 @@ impl Literal {
 #[derive(Copy, Clone)]
 pub enum RuleKind {
     InstallRoot,
+    /// The rule consists of a single literal
+    Unit(Literal),
+    /// The solvable requires the candidates associated to the match spec
     Requires(SolvableId, MatchSpecId),
+    /// The solvable forbids the candidates associated to the match spec
     Constrains(SolvableId, MatchSpecId),
+    /// Only one candidate for the given package name may be true
+    SameName(StringId),
 }
 
 impl RuleKind {
     fn initial_watches(&self, pool: &Pool) -> Option<(SolvableId, SolvableId)> {
         match self {
             RuleKind::InstallRoot => None,
+            RuleKind::SameName(_) => None,
+            RuleKind::Unit(_) => unreachable!(),
             RuleKind::Requires(id, match_spec) | RuleKind::Constrains(id, match_spec) => {
                 let &first_candidate = pool.match_spec_to_candidates[match_spec.index()]
                     .as_ref()
