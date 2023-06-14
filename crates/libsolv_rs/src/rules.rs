@@ -1,6 +1,7 @@
+use crate::decision_map::DecisionMap;
 use crate::pool::{MatchSpecId, Pool, StringId};
 use crate::solvable::{Solvable, SolvableId};
-use crate::solver::{DecisionMap, RuleId};
+use crate::solver::RuleId;
 
 #[derive(Clone)]
 pub(crate) struct Rule {

@@ -1,8 +1,10 @@
+use crate::decision_map::DecisionMap;
 use crate::pool::{MatchSpecId, Pool, StringId};
 use crate::rules::{Literal, Rule, RuleKind};
 use crate::solvable::{Solvable, SolvableId};
 use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
 use crate::solve_problem::SolveProblem;
+use crate::watch_map::WatchMap;
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -75,42 +77,6 @@ impl Default for Config {
     }
 }
 
-/// Map of all available solvables
-pub(crate) struct DecisionMap {
-    /// = 0: undecided
-    /// > 0: level of decision when installed
-    /// < 0: level of decision when conflict
-    map: Vec<i64>,
-}
-
-impl DecisionMap {
-    pub fn new(nsolvables: usize) -> Self {
-        Self {
-            map: vec![0; nsolvables],
-        }
-    }
-
-    pub fn reset(&mut self, solvable_id: SolvableId) {
-        self.map[solvable_id.index()] = 0;
-    }
-
-    pub fn set(&mut self, solvable_id: SolvableId, value: bool, level: u32) {
-        self.map[solvable_id.index()] = if value { level as i64 } else { -(level as i64) };
-    }
-
-    pub fn level(&mut self, solvable_id: SolvableId) -> u32 {
-        self.map[solvable_id.index()].abs() as u32
-    }
-
-    pub fn value(&self, solvable_id: SolvableId) -> Option<bool> {
-        match self.map[solvable_id.index()].cmp(&0) {
-            Ordering::Less => Some(false),
-            Ordering::Equal => None,
-            Ordering::Greater => Some(true),
-        }
-    }
-}
-
 pub struct Solver {
     config: Config,
     pool: Pool,
@@ -118,7 +84,7 @@ pub struct Solver {
     propagate_index: usize,
 
     rules: Vec<Rule>,
-    watches: Vec<RuleId>,
+    watches: WatchMap,
 
     learnt_rules: Vec<Vec<Literal>>,
 
@@ -132,7 +98,6 @@ pub struct Solver {
     learnt_rules_start: RuleId,
 
     decision_map: DecisionMap,
-    // name_rules: HashMap<StringId, RuleId>,
 
     /* list of lists of conflicting rules, < 0 for job rules */
     problems: VecDeque<()>,
@@ -150,11 +115,6 @@ pub mod flags {
     pub const SOLVER_LOCK: u32 = 1536;
 }
 
-// Solver flags used
-// * SOLVER_FLAG_ALLOW_UNINSTALL
-// * SOLVER_FLAG_ALLOW_DOWNGRADE
-// -> All other flags are unused
-
 impl Solver {
     /// Create a solver, using the provided pool
     pub fn new(pool: Pool) -> Self {
@@ -162,7 +122,7 @@ impl Solver {
             propagate_index: 0,
 
             rules: vec![Rule::new(RuleKind::InstallRoot, &[], &pool)],
-            watches: Vec::new(),
+            watches: WatchMap::new(),
             learnt_rules: Vec::new(),
             rule_assertions: VecDeque::from([RuleId::new(0)]),
             decision_queue: VecDeque::new(),
@@ -172,7 +132,6 @@ impl Solver {
             learnt_rules_start: RuleId(0),
 
             decision_map: DecisionMap::new(pool.nsolvables()),
-            // name_rules: HashMap::default(),
             problems: VecDeque::new(),
 
             config: Config::default(),
@@ -371,45 +330,21 @@ impl Solver {
     }
 
     fn run_sat(&mut self) {
-        // This thing is normally true
-        // let disable_rules = true;
+        let mut level = match self.install_root_solvable() {
+            Ok(new_level) => new_level,
+            Err(_) => panic!("install root solvable failed"),
+        };
 
-        // let mut decision_queue = VecDeque::new();
-        let mut level = 0;
+        if let Err((_, cause)) = self.propagate(level) {
+            self.analyze_unsolvable(cause, false);
+            panic!("Propagate after installing root failed");
+        }
 
-        // What is this again?
-        let mut root_level = 1;
+        // TODO: propagate assertions (right now, only requirements without candidates)
+        //       currently handled by forbidding such requirements (panic when we encounter them)
 
-        loop {
-            println!("=== New SAT round at level {level}");
-
-            // First rule decision
-            if level == 0 {
-                level = match self.install_root_solvable() {
-                    Ok(new_level) => new_level,
-                    Err(_) => break,
-                };
-
-                println!("=== Root solvable installed at level {level}");
-
-                if let Err((_, cause)) = self.propagate(level) {
-                    println!("=== Propagate failed... HOW?");
-                    self.analyze_unsolvable(cause, false);
-                    continue;
-                }
-
-                // Why would we increase the root level? Maybe if we have assertions that are
-                // unavoidable, but still want to make a distinction between them and installing
-                // root?
-                root_level = level + 1;
-            }
-
-            // Resolve deps
-            let original_level = level;
-            level = self.resolve_dependencies(level);
-
-            // TODO: if we are always returning, do we need a loop? What is libsolv doing?
-            return;
+        if let Err(_) = self.resolve_dependencies(level) {
+            panic!("Resolve dependencies failed");
         }
     }
 
@@ -430,9 +365,7 @@ impl Solver {
     }
 
     /// Resolves all dependencies
-    ///
-    /// TODO: what does this thing return?
-    fn resolve_dependencies(&mut self, mut level: u32) -> u32 {
+    fn resolve_dependencies(&mut self, mut level: u32) -> Result<u32, u32> {
         let mut i = 0;
         loop {
             if i >= self.rules.len() {
@@ -486,7 +419,7 @@ impl Solver {
             level = self.set_propagate_learn(level, candidate, true, RuleId::new(i));
 
             if level < orig_level {
-                return level;
+                return Err(level);
             }
 
             // We have made progress, and should look at all rules in the next iteration
@@ -494,7 +427,7 @@ impl Solver {
         }
 
         // We just went through all rules and there are no choices left to be made
-        level
+        Ok(level)
     }
 
     fn set_propagate_learn(
@@ -554,17 +487,17 @@ impl Solver {
             let pkg = decision.solvable_id;
 
             // Propagate, iterating through the linked list of rules that watch this solvable
-            let mut old_prev_rule_id: Option<RuleId> = None;
-            let mut prev_rule_id: Option<RuleId> = None;
-            let mut rule_id = self.watches[self.pool.solvables.len() + pkg.index()];
+            let mut old_predecessor_rule_id: Option<RuleId> = None;
+            let mut predecessor_rule_id: Option<RuleId> = None;
+            let mut rule_id = self.watches.first_rule_watching_solvable(pkg);
             while !rule_id.is_null() {
-                if prev_rule_id == Some(rule_id) {
+                if predecessor_rule_id == Some(rule_id) {
                     panic!("Linked list is circular!");
                 }
 
                 // This is a convoluted way of getting mutable access to the current and the previous rule,
                 // which is necessary when we have to remove the current rule from the list
-                let (prev_rule, rule) = if let Some(prev_rule_id) = prev_rule_id {
+                let (predecessor_rule, rule) = if let Some(prev_rule_id) = predecessor_rule_id {
                     if prev_rule_id < rule_id {
                         let (prev, current) = self.rules.split_at_mut(rule_id.index());
                         (Some(&mut prev[prev_rule_id.index()]), &mut current[0])
@@ -577,8 +510,8 @@ impl Solver {
                 };
 
                 // Update the prev_rule_id for the next run
-                old_prev_rule_id = prev_rule_id;
-                prev_rule_id = Some(rule_id);
+                old_predecessor_rule_id = predecessor_rule_id;
+                predecessor_rule_id = Some(rule_id);
 
                 // Configure the next rule to visit
                 let this_rule_id = rule_id;
@@ -602,29 +535,18 @@ impl Solver {
 
                         // Replace the now-false watch by a new one
                         rule.watched_literals[watch_index] = variable;
-
-                        // Remove this rule from its current place in the linked list, because we
-                        // are no longer watching what brought us here
-                        if let Some(prev_rule) = prev_rule {
-                            // Unlink the rule
-                            prev_rule.unlink_rule(&rule, this_rule_id, watch_index);
-                        } else {
-                            // This was the first rule in the chain
-                            self.watches[self.pool.solvables.len() + pkg.index()] =
-                                rule.get_linked_rule(watch_index);
-                        }
-
-                        // Insert the rule into its new place in the linked list
-                        rule.link_to_rule(
+                        self.watches.update_watched(
+                            predecessor_rule,
+                            rule,
+                            this_rule_id,
                             watch_index,
-                            self.watches[self.pool.solvables.len() + variable.index()],
+                            pkg,
                         );
-                        self.watches[self.pool.solvables.len() + variable.index()] = this_rule_id;
 
-                        // Make sure the previous rule is kept for the next iteration (i.e. the
-                        // current rule is no longer a predecessor of the next one; the previous
-                        // rule is)
-                        prev_rule_id = old_prev_rule_id;
+                        // Make sure the right predecessor is kept for the next iteration (i.e. the
+                        // current rule is no longer a predecessor of the next one; the current
+                        // rule's predecessor is)
+                        predecessor_rule_id = old_predecessor_rule_id;
                     } else {
                         // We could not find another literal to watch, which means the remaining
                         // watched literal can be set to true
@@ -756,15 +678,8 @@ impl Solver {
             &self.pool,
         );
 
-        // Hook the rule up to the watches
         if rule.has_watches() {
-            let w1 = self.pool.solvables.len() + rule.watched_literals[0].index();
-            rule.link_to_rule(0, self.watches[w1]);
-            self.watches[w1] = rule_id;
-
-            let w2 = self.pool.solvables.len() + rule.watched_literals[1].index();
-            rule.link_to_rule(1, self.watches[w2]);
-            self.watches[w2] = rule_id;
+            self.watches.start_watching(&mut rule, rule_id);
         }
 
         // Store it
@@ -819,23 +734,17 @@ impl Solver {
     }
 
     fn make_watches(&mut self) {
-        // Lower half for removals, upper half for installs
-        self.watches = vec![RuleId::null(); self.pool.solvables.len() * 2];
+        self.watches.initialize(self.pool.solvables.len());
 
-        // Watches are already initialized in the rules themselves, here we initialize the linked list
-        for (i, rule) in self.rules.iter_mut().enumerate().skip(1).rev() {
+        // Watches are already initialized in the rules themselves, here we build a linked list for
+        // each package (a rule will be linked to other rules that are watching the same package)
+        for (i, rule) in self.rules.iter_mut().enumerate() {
             if !rule.has_watches() {
                 // Skip rules without watches
                 continue;
             }
 
-            let w1 = self.pool.solvables.len() + rule.watched_literals[0].index();
-            rule.link_to_rule(0, self.watches[w1]);
-            self.watches[w1] = RuleId::new(i);
-
-            let w2 = self.pool.solvables.len() + rule.watched_literals[1].index();
-            rule.link_to_rule(1, self.watches[w2]);
-            self.watches[w2] = RuleId::new(i);
+            self.watches.start_watching(rule, RuleId::new(i));
         }
     }
 }

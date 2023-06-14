@@ -22,15 +22,18 @@ pub fn get_required_packages(
 
     for &(id, kind) in &transaction.steps {
         // Retrieve the repodata record corresponding to this solvable
-        let (repo_index, solvable_index) = get_solvable_indexes(pool, repo_mapping, id);
-        let repodata_record = &repodata_records[repo_index][solvable_index];
+        //
+        // Note that packages without indexes are virtual and can be ignored
+        if let Some((repo_index, solvable_index)) = get_solvable_indexes(pool, repo_mapping, id) {
+            let repodata_record = &repodata_records[repo_index][solvable_index];
 
-        match kind {
-            TransactionKind::Install => {
-                required_packages.push(repodata_record.clone());
-            }
-            _ => {
-                unsupported_operations.push(kind);
+            match kind {
+                TransactionKind::Install => {
+                    required_packages.push(repodata_record.clone());
+                }
+                _ => {
+                    unsupported_operations.push(kind);
+                }
             }
         }
     }
@@ -46,12 +49,12 @@ fn get_solvable_indexes(
     pool: &Pool,
     repo_mapping: &HashMap<RepoId, usize>,
     id: SolvableId,
-) -> (usize, usize) {
+) -> Option<(usize, usize)> {
     let solvable = pool.resolve_solvable(id);
-    let solvable_index = solvable.package().metadata.original_index.unwrap();
+    let solvable_index = solvable.package().metadata.original_index?;
 
     let repo_id = solvable.repo_id();
     let repo_index = repo_mapping[&repo_id];
 
-    (repo_index, solvable_index)
+    Some((repo_index, solvable_index))
 }
