@@ -1,5 +1,6 @@
 use crate::solvable::{Solvable, SolvableId};
 use rattler_conda_types::{MatchSpec, PackageRecord};
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -128,9 +129,11 @@ impl Pool {
         match self.match_specs_to_ids.entry(match_spec) {
             Entry::Occupied(entry) => entry.get().clone(),
             Entry::Vacant(entry) => {
+                // println!("Interning match_spec: {}", entry.key());
                 self.match_specs
                     .push(MatchSpec::from_str(entry.key()).unwrap());
                 self.match_spec_to_candidates.push(None);
+                self.match_spec_to_forbidden.push(None);
 
                 // Update the entry
                 let id = MatchSpecId::new(next_index);
@@ -173,11 +176,20 @@ impl Pool {
                 Some(name_id) => name_id,
             };
 
-            packages_by_name[&name_id]
+            let mut pkgs: Vec<_> = packages_by_name[&name_id]
                 .iter()
                 .cloned()
                 .filter(|solvable| match_spec.matches(solvables[solvable.index()].package().record))
-                .collect()
+                .collect();
+
+            pkgs.sort_by(|p1, p2| {
+                Pool::compare_candidates(
+                    &solvables[p1.index()].package().record,
+                    &solvables[p2.index()].package().record,
+                )
+            });
+
+            pkgs
         });
 
         candidates.as_slice()
@@ -299,5 +311,131 @@ impl Pool {
         } else {
             panic!("invalid solvable id!")
         }
+    }
+
+    // TODO: this belongs in a different place
+    // fn find_highest_version(packages_by_name: &HashMap<StringId, Vec<SolvableId>>, match_spec: &MatchSpec) -> Option<(Version, bool)> {
+    //     // Go through all packages
+    //
+    //     self.query(match_spec).fold(None, |init, record| {
+    //         Some(init.map_or_else(
+    //             || {
+    //                 (
+    //                     record.package_record.version.clone(),
+    //                     !record.package_record.track_features.is_empty(),
+    //                 )
+    //             },
+    //             |(version, has_tracked_features)| {
+    //                 (
+    //                     version.max(record.package_record.version.clone()),
+    //                     has_tracked_features && record.package_record.track_features.is_empty(),
+    //                 )
+    //             },
+    //         ))
+    //     })
+    // }
+
+    // TODO: this belongs in a different place
+    /// Returns the order of two candidates based on rules used by conda.
+    fn compare_candidates(a: &PackageRecord, b: &PackageRecord) -> Ordering {
+        // First compare by "tracked_features". If one of the packages has a tracked feature it is
+        // sorted below the one that doesn't have the tracked feature.
+        let a_has_tracked_features = a.track_features.is_empty();
+        let b_has_tracked_features = b.track_features.is_empty();
+        match b_has_tracked_features.cmp(&a_has_tracked_features) {
+            Ordering::Less => return Ordering::Less,
+            Ordering::Greater => return Ordering::Greater,
+            Ordering::Equal => {}
+        };
+
+        // Otherwise, select the variant with the highest version
+        match a.version.cmp(&b.version) {
+            Ordering::Less => return Ordering::Greater,
+            Ordering::Greater => return Ordering::Less,
+            Ordering::Equal => {}
+        };
+
+        // Otherwise, select the variant with the highest build number
+        match a.build_number.cmp(&b.build_number) {
+            Ordering::Less => return Ordering::Greater,
+            Ordering::Greater => return Ordering::Less,
+            Ordering::Equal => {}
+        };
+
+        // // Otherwise, compare the dependencies of the variants. If there are similar
+        // // dependencies select the variant that selects the highest version of the dependency.
+        // let a_match_specs: Vec<_> = r1
+        //     .package_record
+        //     .depends
+        //     .iter()
+        //     .map(|d| MatchSpec::from_str(d).unwrap())
+        //     .collect();
+        // let b_match_specs: Vec<_> = r1
+        //     .package_record
+        //     .depends
+        //     .iter()
+        //     .map(|d| MatchSpec::from_str(d).unwrap())
+        //     .collect();
+        //
+        // let b_specs_by_name: HashMap<_, _> = b_match_specs
+        //     .iter()
+        //     .filter_map(|spec| spec.name.as_ref().map(|name| (name, spec)))
+        //     .collect();
+        //
+        // let a_specs_by_name = a_match_specs
+        //     .iter()
+        //     .filter_map(|spec| spec.name.as_ref().map(|name| (name, spec)));
+        //
+        // let mut total_score = 0;
+        // for (a_dep_name, a_spec) in a_specs_by_name {
+        //     if let Some(b_spec) = b_specs_by_name.get(&a_dep_name) {
+        //         if &a_spec == b_spec {
+        //             continue;
+        //         }
+        //
+        //         // Find which of the two specs selects the highest version
+        //         let highest_a = self.find_highest_version(a_spec);
+        //         let highest_b = self.find_highest_version(b_spec);
+        //
+        //         // Skip version if no package is selected by either spec
+        //         let (a_version, a_tracked_features, b_version, b_tracked_features) = if let (
+        //             Some((a_version, a_tracked_features)),
+        //             Some((b_version, b_tracked_features)),
+        //         ) =
+        //             (highest_a, highest_b)
+        //         {
+        //             (a_version, a_tracked_features, b_version, b_tracked_features)
+        //         } else {
+        //             continue;
+        //         };
+        //
+        //         // If one of the dependencies only selects versions with tracked features, down-
+        //         // weight that variant.
+        //         if let Some(score) = match a_tracked_features.cmp(&b_tracked_features) {
+        //             Ordering::Less => Some(-100),
+        //             Ordering::Greater => Some(100),
+        //             Ordering::Equal => None,
+        //         } {
+        //             total_score += score;
+        //             continue;
+        //         }
+        //
+        //         // Otherwise, down-weigh the version with the lowest selected version.
+        //         total_score += match a_version.cmp(&b_version) {
+        //             Ordering::Less => 1,
+        //             Ordering::Equal => 0,
+        //             Ordering::Greater => -1,
+        //         };
+        //     }
+        // }
+        //
+        // // If ranking the dependencies provides a score, use that for the sorting.
+        // match total_score.cmp(&0) {
+        //     Ordering::Equal => {}
+        //     ord => return ord,
+        // };
+
+        // Otherwise, order by timestamp
+        b.timestamp.cmp(&a.timestamp)
     }
 }

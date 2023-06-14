@@ -1,6 +1,6 @@
 use crate::decision_map::DecisionMap;
-use crate::pool::{MatchSpecId, Pool, StringId};
-use crate::solvable::{Solvable, SolvableId};
+use crate::pool::{MatchSpecId, Pool};
+use crate::solvable::SolvableId;
 use crate::solver::RuleId;
 
 #[derive(Clone)]
@@ -322,13 +322,6 @@ pub struct Literal {
 }
 
 impl Literal {
-    pub(crate) fn negate(solvable_id: SolvableId) -> Self {
-        Self {
-            solvable_id,
-            negate: true,
-        }
-    }
-
     pub(crate) fn invert(mut self) -> Self {
         self.negate = !self.negate;
         self
@@ -396,8 +389,16 @@ impl RuleKind {
                     ])
                 }
             }
-            RuleKind::Requires(id, match_spec) | RuleKind::Constrains(id, match_spec) => {
+            RuleKind::Requires(id, match_spec) => {
                 let &first_candidate = pool.match_spec_to_candidates[match_spec.index()]
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .next()?;
+                Some([*id, first_candidate])
+            }
+            RuleKind::Constrains(id, match_spec) => {
+                let &first_candidate = pool.match_spec_to_forbidden[match_spec.index()]
                     .as_ref()
                     .unwrap()
                     .iter()

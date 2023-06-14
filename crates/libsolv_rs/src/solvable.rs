@@ -1,4 +1,4 @@
-use crate::pool::{MatchSpecId, Pool, RepoId, StringId};
+use crate::pool::{MatchSpecId, RepoId, StringId};
 use rattler_conda_types::PackageRecord;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]

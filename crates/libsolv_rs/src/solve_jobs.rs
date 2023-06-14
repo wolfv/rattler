@@ -49,21 +49,21 @@ impl SolveJobs {
 
     /// Favor the specified solvable over other variants. This doesnt mean this variant will be
     /// used. To guarantee a solvable is used (if selected) use the `Self::lock` function.
-    pub fn favor(&mut self, id: SolvableId) {
+    pub fn favor(&mut self, _id: SolvableId) {
         todo!()
         // self.items.push_back((Id::solvable(id), SolveOperation::Update));
     }
 
     /// Lock the specified solvable over other variants. This implies that not other variant will
     /// ever be considered.
-    pub fn lock(&mut self, id: SolvableId) {
+    pub fn lock(&mut self, _id: SolvableId) {
         todo!()
         // self.items.push_back((Id::solvable(id), SolveOperation::Lock));
     }
 
     /// Disfavor the specified variant over other variants. This does not mean it will never be
     /// selected, but other variants are considered first.
-    pub fn disfavor(&mut self, id: SolvableId) {
+    pub fn disfavor(&mut self, _id: SolvableId) {
         todo!()
         // self.items.push_back((Id::solvable(id), SolveOperation::Disfavor));
     }

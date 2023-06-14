@@ -1,13 +1,12 @@
 use crate::decision_map::DecisionMap;
-use crate::pool::{MatchSpecId, Pool, StringId};
+use crate::pool::{MatchSpecId, Pool};
 use crate::rules::{Literal, Rule, RuleKind};
-use crate::solvable::{Solvable, SolvableId};
+use crate::solvable::SolvableId;
 use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
-use crate::solve_problem::SolveProblem;
+
 use crate::watch_map::WatchMap;
-use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+
+use std::collections::{HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 #[derive(Copy, Clone, PartialOrd, Ord, Eq, PartialEq, Debug)]
@@ -93,7 +92,6 @@ pub struct Solver {
 
     decision_queue: VecDeque<Decision>,
     decision_queue_why: VecDeque<RuleId>,
-    decision_queue_reason: VecDeque<u32>,
 
     learnt_rules_start: RuleId,
 
@@ -127,7 +125,6 @@ impl Solver {
             rule_assertions: VecDeque::from([RuleId::new(0)]),
             decision_queue: VecDeque::new(),
             decision_queue_why: VecDeque::new(),
-            decision_queue_reason: VecDeque::new(),
 
             learnt_rules_start: RuleId(0),
 
@@ -190,7 +187,7 @@ impl Solver {
         }
 
         // Initialize rules ensuring only a single candidate per package name is installed
-        for (name_id, candidates) in &self.pool.packages_by_name {
+        for (_name_id, candidates) in &self.pool.packages_by_name {
             // Each candidate gets a rule with each other candidate
             for (i, &candidate) in candidates.iter().enumerate() {
                 for &other_candidate in &candidates[i + 1..] {
@@ -330,7 +327,7 @@ impl Solver {
     }
 
     fn run_sat(&mut self) {
-        let mut level = match self.install_root_solvable() {
+        let level = match self.install_root_solvable() {
             Ok(new_level) => new_level,
             Err(_) => panic!("install root solvable failed"),
         };
@@ -354,10 +351,6 @@ impl Solver {
         self.decision_queue
             .push_back(Decision::new(SolvableId::root(), true));
         self.decision_queue_why.push_back(RuleId::new(0));
-
-        // TODO: why do we push twice here? Why push at all?
-        // self.decision_queue_reason.push_back(0);
-        // self.decision_queue_reason.push_back(0);
 
         self.decision_map.set(SolvableId::root(), true, 1);
 
@@ -752,8 +745,8 @@ impl Solver {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::solvable::Solvable;
-    use rattler_conda_types::{PackageRecord, Version};
+
+    use rattler_conda_types::PackageRecord;
 
     fn pool(packages: &[(&str, &str, Vec<&str>)]) -> Pool {
         let mut pool = Pool::new();
