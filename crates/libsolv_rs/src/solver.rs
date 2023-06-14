@@ -358,6 +358,12 @@ impl Solver {
         for (i, rule) in self.rules.iter().enumerate() {
             if let RuleKind::Requires(solvable_id, _) = rule.kind {
                 if !rule.has_watches() {
+                    match self.decision_map.value(solvable_id) {
+                        Some(true) => return Err(()),
+                        Some(false) => continue,
+                        None => (),
+                    }
+
                     // A requires rule without watches means it has a single literal (i.e.
                     // there are no candidates)
                     self.decision_queue
@@ -423,13 +429,12 @@ impl Solver {
 
             // Assumption: there are multiple candidates, otherwise this would have already been handled
             // by unit propagation
-            let orig_level = level;
             self.create_branch();
             level = self.set_propagate_learn(level, candidate, true, RuleId::new(i));
 
-            if level < orig_level {
-                return Err(level);
-            }
+            // if level < orig_level {
+            //     return Err(level);
+            // }
 
             // We have made progress, and should look at all rules in the next iteration
             i = 0;
