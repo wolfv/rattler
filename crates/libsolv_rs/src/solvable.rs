@@ -1,7 +1,7 @@
 use crate::pool::{MatchSpecId, Pool, RepoId, StringId};
 use rattler_conda_types::PackageRecord;
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct SolvableId(u32);
 
 impl SolvableId {

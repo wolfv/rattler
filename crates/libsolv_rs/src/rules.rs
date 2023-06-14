@@ -5,26 +5,27 @@ use crate::solver::{DecisionMap, RuleId};
 #[derive(Clone)]
 pub(crate) struct Rule {
     pub enabled: bool,
-    pub w1: SolvableId,
-    pub w2: SolvableId,
-    pub n1: RuleId,
-    pub n2: RuleId,
+    pub watched_literals: [SolvableId; 2],
+    next_watches: [RuleId; 2],
     pub kind: RuleKind,
 }
 
 impl Rule {
     pub fn new(kind: RuleKind, learnt_rules: &[Vec<Literal>], pool: &Pool) -> Self {
-        let (w1, w2) = kind
+        let watched_literals = kind
             .initial_watches(learnt_rules, pool)
-            .unwrap_or((SolvableId::null(), SolvableId::null()));
-        Self {
+            .unwrap_or([SolvableId::null(), SolvableId::null()]);
+
+        let rule = Self {
             enabled: true,
-            w1,
-            w2,
-            n1: RuleId::null(),
-            n2: RuleId::null(),
+            watched_literals,
+            next_watches: [RuleId::null(), RuleId::null()],
             kind,
-        }
+        };
+
+        debug_assert!(!rule.has_watches() || watched_literals[0] != watched_literals[1]);
+
+        rule
     }
 
     pub fn debug(&self, pool: &Pool) {
@@ -48,9 +49,60 @@ impl Rule {
         }
     }
 
+    pub fn link_to_rule(&mut self, watch_index: usize, linked_rule: RuleId) {
+        self.next_watches[watch_index] = linked_rule;
+    }
+
+    pub fn get_linked_rule(&self, watch_index: usize) -> RuleId {
+        self.next_watches[watch_index]
+    }
+
+    pub fn unlink_rule(
+        &mut self,
+        linked_rule: &Rule,
+        linked_rule_id: RuleId,
+        linked_rule_watch_index: usize,
+    ) {
+        if self.next_watches[0] == linked_rule_id {
+            self.next_watches[0] = linked_rule.next_watches[linked_rule_watch_index];
+        } else {
+            debug_assert!(self.next_watches[1] == linked_rule_id);
+            self.next_watches[1] = linked_rule.next_watches[linked_rule_watch_index];
+        }
+    }
+
+    pub fn next_watched_rule(&self, solvable_id: SolvableId) -> RuleId {
+        if solvable_id == self.watched_literals[0] {
+            self.next_watches[0]
+        } else {
+            debug_assert!(self.watched_literals[1] == solvable_id);
+            self.next_watches[1]
+        }
+    }
+
+    // Returns the index of the watch that turned false, if any
+    pub fn watch_turned_false(
+        &self,
+        solvable_id: SolvableId,
+        decision_map: &DecisionMap,
+        learnt_rules: &[Vec<Literal>],
+    ) -> Option<([Literal; 2], usize)> {
+        debug_assert!(self.watched_literals.contains(&solvable_id));
+
+        let literals @ [w1, w2] = self.watched_literals(learnt_rules);
+
+        if solvable_id == w1.solvable_id && w1.eval(decision_map) == Some(false) {
+            Some((literals, 0))
+        } else if solvable_id == w2.solvable_id && w2.eval(decision_map) == Some(false) {
+            Some((literals, 1))
+        } else {
+            None
+        }
+    }
+
     pub fn has_watches(&self) -> bool {
-        // If w1 is not null, w2 won't be either
-        !self.w1.is_null()
+        // If the first watch is not null, the second won't be either
+        !self.watched_literals[0].is_null()
     }
 
     pub fn find_literal(&self, solvable_id: SolvableId, learnt_rules: &[Vec<Literal>]) -> Literal {
@@ -60,75 +112,60 @@ impl Rule {
                 let negate = solvable_id == s;
                 Literal {
                     solvable_id,
-                    negate
+                    negate,
                 }
             }
-            RuleKind::Constrains(_, _) |
-            RuleKind::SameName(_, _) =>
-                Literal {
-                    solvable_id,
-                    negate: true
-                },
-            RuleKind::Learnt(index) => learnt_rules[index].iter().find(|lit| lit.solvable_id == solvable_id).unwrap().clone()
+            RuleKind::Constrains(_, _) | RuleKind::SameName(_, _) => Literal {
+                solvable_id,
+                negate: true,
+            },
+            RuleKind::Learnt(index) => learnt_rules[index]
+                .iter()
+                .find(|lit| lit.solvable_id == solvable_id)
+                .unwrap()
+                .clone(),
         }
     }
 
-    pub fn watched_literals(&self, learnt_rules: &[Vec<Literal>]) -> (Literal, Literal) {
+    pub fn watched_literals(&self, learnt_rules: &[Vec<Literal>]) -> [Literal; 2] {
+        let literals = |op1: bool, op2: bool| {
+            [
+                Literal {
+                    solvable_id: self.watched_literals[0],
+                    negate: !op1,
+                },
+                Literal {
+                    solvable_id: self.watched_literals[1],
+                    negate: !op2,
+                },
+            ]
+        };
+
         match self.kind {
             RuleKind::InstallRoot => unreachable!(),
             RuleKind::Learnt(index) => {
                 // TODO: this is probably not going to cut it for performance
-                let &w1 = learnt_rules[index].iter().find(|l| l.solvable_id == self.w1).unwrap();
-                let &w2 = learnt_rules[index].iter().find(|l| l.solvable_id == self.w2).unwrap();
-                (w1, w2)
+                let &w1 = learnt_rules[index]
+                    .iter()
+                    .find(|l| l.solvable_id == self.watched_literals[0])
+                    .unwrap();
+                let &w2 = learnt_rules[index]
+                    .iter()
+                    .find(|l| l.solvable_id == self.watched_literals[1])
+                    .unwrap();
+                [w1, w2]
             }
-            RuleKind::SameName(s1, s2) => (Literal::negate(s1), Literal::negate(s2)),
+            RuleKind::SameName(_, _) => literals(false, false),
             RuleKind::Requires(solvable_id, _) => {
-                if self.w1 == solvable_id {
-                    (
-                        Literal {
-                            solvable_id: self.w1,
-                            negate: true,
-                        },
-                        Literal {
-                            solvable_id: self.w2,
-                            negate: false,
-                        },
-                    )
-                } else if self.w2 == solvable_id {
-                    (
-                        Literal {
-                            solvable_id: self.w1,
-                            negate: false,
-                        },
-                        Literal {
-                            solvable_id: self.w2,
-                            negate: true,
-                        },
-                    )
+                if self.watched_literals[0] == solvable_id {
+                    literals(false, true)
+                } else if self.watched_literals[1] == solvable_id {
+                    literals(true, false)
                 } else {
-                    (
-                        Literal {
-                            solvable_id: self.w1,
-                            negate: false,
-                        },
-                        Literal {
-                            solvable_id: self.w2,
-                            negate: false,
-                        },
-                    )
+                    literals(true, true)
                 }
             }
-            RuleKind::Constrains(_, _) => (
-                Literal {
-                    solvable_id: self.w1,
-                    negate: true,
-                },
-                Literal {
-                    solvable_id: self.w2,
-                    negate: true,
-                },
-            ),
+            RuleKind::Constrains(_, _) => literals(false, false),
         }
     }
 
@@ -142,16 +179,17 @@ impl Rule {
         // * Not already being watched
         // * Not yet decided, or decided in such a way that the literal yields true
         let can_watch = |solvable_lit: Literal| {
-            self.w1 != solvable_lit.solvable_id
-                && self.w2 != solvable_lit.solvable_id
+            !self.watched_literals.contains(&solvable_lit.solvable_id)
                 && solvable_lit.eval(decision_map).unwrap_or(true)
         };
 
         match self.kind {
             RuleKind::InstallRoot => unreachable!(),
-            RuleKind::Learnt(index) => {
-                learnt_rules[index].iter().cloned().find(|&l| can_watch(l)).map(|l| l.solvable_id)
-            }
+            RuleKind::Learnt(index) => learnt_rules[index]
+                .iter()
+                .cloned()
+                .find(|&l| can_watch(l))
+                .map(|l| l.solvable_id),
             RuleKind::SameName(_, _) => None,
             RuleKind::Requires(solvable_id, match_spec_id) => {
                 // The solvable that added this rule
@@ -219,13 +257,11 @@ impl Rule {
     ) -> Vec<Literal> {
         match self.kind {
             RuleKind::InstallRoot => unreachable!(),
-            RuleKind::Learnt(index) => {
-                learnt_rules[index]
-                    .iter()
-                    .cloned()
-                    .filter(|lit| lit.solvable_id != variable)
-                    .collect()
-            }
+            RuleKind::Learnt(index) => learnt_rules[index]
+                .iter()
+                .cloned()
+                .filter(|lit| lit.solvable_id != variable)
+                .collect(),
             RuleKind::Requires(solvable_id, match_spec_id) => {
                 // All variables contribute to the conflict
                 std::iter::once(Literal {
@@ -288,7 +324,7 @@ impl Literal {
     pub(crate) fn negate(solvable_id: SolvableId) -> Self {
         Self {
             solvable_id,
-            negate: true
+            negate: true,
         }
     }
 
@@ -316,7 +352,7 @@ impl Literal {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum RuleKind {
     InstallRoot,
     /// The solvable requires the candidates associated to the match spec
@@ -338,10 +374,14 @@ pub enum RuleKind {
 }
 
 impl RuleKind {
-    fn initial_watches(&self, learnt_rules: &[Vec<Literal>], pool: &Pool) -> Option<(SolvableId, SolvableId)> {
+    fn initial_watches(
+        &self,
+        learnt_rules: &[Vec<Literal>],
+        pool: &Pool,
+    ) -> Option<[SolvableId; 2]> {
         match self {
             RuleKind::InstallRoot => None,
-            RuleKind::SameName(s1, s2) => Some((*s1, *s2)),
+            RuleKind::SameName(s1, s2) => Some([*s1, *s2]),
             RuleKind::Learnt(index) => {
                 let literals = &learnt_rules[*index];
                 debug_assert!(literals.len() >= 1);
@@ -349,7 +389,10 @@ impl RuleKind {
                     // No need for watches, since we learned an assertion
                     None
                 } else {
-                    Some((literals.first().unwrap().solvable_id, literals.last().unwrap().solvable_id))
+                    Some([
+                        literals.first().unwrap().solvable_id,
+                        literals.last().unwrap().solvable_id,
+                    ])
                 }
             }
             RuleKind::Requires(id, match_spec) | RuleKind::Constrains(id, match_spec) => {
@@ -358,7 +401,7 @@ impl RuleKind {
                     .unwrap()
                     .iter()
                     .next()?;
-                Some((*id, first_candidate))
+                Some([*id, first_candidate])
             }
         }
     }

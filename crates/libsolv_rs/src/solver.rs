@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
-#[derive(Copy, Clone, PartialOrd, Ord, Eq, PartialEq)]
+#[derive(Copy, Clone, PartialOrd, Ord, Eq, PartialEq, Debug)]
 pub struct RuleId(u32);
 
 impl RuleId {
@@ -37,7 +37,10 @@ struct Decision {
 
 impl Decision {
     fn new(solvable: SolvableId, value: bool) -> Self {
-        Self { solvable_id: solvable, value }
+        Self {
+            solvable_id: solvable,
+            value,
+        }
     }
 }
 
@@ -232,8 +235,11 @@ impl Solver {
             // Each candidate gets a rule with each other candidate
             for (i, &candidate) in candidates.iter().enumerate() {
                 for &other_candidate in &candidates[i + 1..] {
-                    self.rules
-                        .push(Rule::new(RuleKind::SameName(candidate, other_candidate), &self.learnt_rules, &self.pool));
+                    self.rules.push(Rule::new(
+                        RuleKind::SameName(candidate, other_candidate),
+                        &self.learnt_rules,
+                        &self.pool,
+                    ));
                 }
             }
         }
@@ -328,8 +334,11 @@ impl Solver {
                 }
 
                 // Create requires rule
-                self.rules
-                    .push(Rule::new(RuleKind::Requires(candidate, dep), &self.learnt_rules, &self.pool));
+                self.rules.push(Rule::new(
+                    RuleKind::Requires(candidate, dep),
+                    &self.learnt_rules,
+                    &self.pool,
+                ));
             }
 
             // Constrains
@@ -345,8 +354,11 @@ impl Solver {
 
                 if !dep_forbidden.is_empty() {
                     // Only add the "constrains" if it actually forbids packages
-                    self.rules
-                        .push(Rule::new(RuleKind::Constrains(candidate, dep), &self.learnt_rules, &self.pool));
+                    self.rules.push(Rule::new(
+                        RuleKind::Constrains(candidate, dep),
+                        &self.learnt_rules,
+                        &self.pool,
+                    ));
                 }
             }
         }
@@ -499,8 +511,7 @@ impl Solver {
         level += 1;
         println!("=== Set {name} = {version} at level {level}");
         self.decision_map.set(solvable, true, level);
-        self.decision_queue
-            .push_back(Decision::new(solvable, true));
+        self.decision_queue.push_back(Decision::new(solvable, true));
         self.decision_queue_why.push_back(rule_id);
 
         loop {
@@ -522,10 +533,7 @@ impl Solver {
             let decision = literal.satisfying_value();
             self.decision_map.set(literal.solvable_id, decision, level);
             self.decision_queue
-                .push_back(Decision::new(
-                    literal.solvable_id,
-                    decision,
-                ));
+                .push_back(Decision::new(literal.solvable_id, decision));
             self.decision_queue_why.push_back(learned_rule_id);
             print!("=== Propagate after learn: ");
             self.pool.resolve_solvable(literal.solvable_id).debug();
@@ -546,6 +554,7 @@ impl Solver {
             let pkg = decision.solvable_id;
 
             // Propagate, iterating through the linked list of rules that watch this solvable
+            let mut old_prev_rule_id: Option<RuleId> = None;
             let mut prev_rule_id: Option<RuleId> = None;
             let mut rule_id = self.watches[self.pool.solvables.len() + pkg.index()];
             while !rule_id.is_null() {
@@ -553,7 +562,8 @@ impl Solver {
                     panic!("Linked list is circular!");
                 }
 
-                // This is a convoluted way of getting mutable access to the current and the previous rule
+                // This is a convoluted way of getting mutable access to the current and the previous rule,
+                // which is necessary when we have to remove the current rule from the list
                 let (prev_rule, rule) = if let Some(prev_rule_id) = prev_rule_id {
                     if prev_rule_id < rule_id {
                         let (prev, current) = self.rules.split_at_mut(rule_id.index());
@@ -567,132 +577,96 @@ impl Solver {
                 };
 
                 // Update the prev_rule_id for the next run
+                old_prev_rule_id = prev_rule_id;
                 prev_rule_id = Some(rule_id);
 
                 // Configure the next rule to visit
                 let this_rule_id = rule_id;
-                if pkg == rule.w1 {
-                    rule_id = rule.n1;
-                } else {
-                    rule_id = rule.n2;
-                }
+                rule_id = rule.next_watched_rule(pkg);
 
                 // Skip disabled rules
                 if !rule.enabled {
                     continue;
                 }
 
-                // TODO: The code below is duplicated for the w1 and w2 case, we should deduplicate it
-                let (w1, w2) = rule.watched_literals(&self.learnt_rules);
-                if pkg == w1.solvable_id && w1.eval(&self.decision_map) == Some(false) {
-                    // The first literal is now false!
-                    if let Some(variable) =
-                        rule.next_unwatched_variable(&self.pool, &self.learnt_rules, &self.decision_map)
-                    {
-                        rule.w1 = variable;
+                if let Some((watched_literals, watch_index)) =
+                    rule.watch_turned_false(pkg, &self.decision_map, &self.learnt_rules)
+                {
+                    // One of the watched literals is now false
+                    if let Some(variable) = rule.next_unwatched_variable(
+                        &self.pool,
+                        &self.learnt_rules,
+                        &self.decision_map,
+                    ) {
+                        debug_assert!(!rule.watched_literals.contains(&variable));
 
-                        // Remove this rule from its current place in the linked list
+                        // Replace the now-false watch by a new one
+                        rule.watched_literals[watch_index] = variable;
+
+                        // Remove this rule from its current place in the linked list, because we
+                        // are no longer watching what brought us here
                         if let Some(prev_rule) = prev_rule {
-                            // Modify the previous rule
-                            if prev_rule.n1 == this_rule_id {
-                                prev_rule.n1 = rule.n1;
-                            } else {
-                                prev_rule.n2 = rule.n1;
-                            }
+                            // Unlink the rule
+                            prev_rule.unlink_rule(&rule, this_rule_id, watch_index);
                         } else {
-                            // This is the first rule in the chain
-                            self.watches[pkg.index()] = rule.n1;
+                            // This was the first rule in the chain
+                            self.watches[self.pool.solvables.len() + pkg.index()] =
+                                rule.get_linked_rule(watch_index);
                         }
 
-                        // Add it to its new place
-                        rule.n1 = self.watches[variable.index()];
-                        self.watches[variable.index()] = this_rule_id;
+                        // Insert the rule into its new place in the linked list
+                        rule.link_to_rule(
+                            watch_index,
+                            self.watches[self.pool.solvables.len() + variable.index()],
+                        );
+                        self.watches[self.pool.solvables.len() + variable.index()] = this_rule_id;
 
-                        continue;
+                        // Make sure the previous rule is kept for the next iteration (i.e. the
+                        // current rule is no longer a predecessor of the next one; the previous
+                        // rule is)
+                        prev_rule_id = old_prev_rule_id;
                     } else {
-                        // There are no terms left to watch, so the clause is now a unit clause
+                        // We could not find another literal to watch, which means the remaining
+                        // watched literal can be set to true
+                        let remaining_watch_index = match watch_index {
+                            0 => 1,
+                            1 => 0,
+                            _ => unreachable!(),
+                        };
 
-                        if w2.eval(&self.decision_map) == Some(false) {
-                            // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
-                            return Err((w2.solvable_id, this_rule_id));
+                        let remaining_watch = watched_literals[remaining_watch_index];
+
+                        match remaining_watch.eval(&self.decision_map) {
+                            // Nothing to do, already decided to true
+                            Some(true) => continue,
+                            // Conflict, already decided to false, so we can't set it to true!
+                            Some(false) => return Err((remaining_watch.solvable_id, this_rule_id)),
+                            None => (),
                         }
 
                         {
-                            let s = self.pool.resolve_solvable(w2.solvable_id).package();
+                            let s = self
+                                .pool
+                                .resolve_solvable(remaining_watch.solvable_id)
+                                .package();
                             println!(
                                 "Propagate {} {} = {}",
                                 s.record.name,
                                 s.record.version,
-                                w2.satisfying_value()
+                                remaining_watch.satisfying_value()
                             );
                         }
-                        self.decision_map
-                            .set(w2.solvable_id, w2.satisfying_value(), level);
-                        self.decision_queue
-                            .push_back(Decision::new(
-                                w2.solvable_id,
-                                w2.satisfying_value(),
-                            ));
+                        self.decision_map.set(
+                            remaining_watch.solvable_id,
+                            remaining_watch.satisfying_value(),
+                            level,
+                        );
+                        self.decision_queue.push_back(Decision::new(
+                            remaining_watch.solvable_id,
+                            remaining_watch.satisfying_value(),
+                        ));
                         self.decision_queue_why.push_back(this_rule_id);
-
-                        continue;
                     }
-                } else if pkg == w2.solvable_id && w2.eval(&self.decision_map) == Some(false) {
-                    // The second literal is now false!
-                    if let Some(variable) =
-                        rule.next_unwatched_variable(&self.pool, &self.learnt_rules, &self.decision_map)
-                    {
-                        rule.w2 = variable;
-
-                        // Remove this rule from its current place in the linked list
-                        if let Some(prev_rule) = prev_rule {
-                            // Modify the previous rule
-                            if prev_rule.n1 == this_rule_id {
-                                prev_rule.n1 = rule.n2;
-                            } else {
-                                prev_rule.n2 = rule.n2;
-                            }
-                        } else {
-                            // This is the first rule in the chain
-                            self.watches[pkg.index()] = rule.n2;
-                        }
-
-                        // Add it to its new place
-                        rule.n2 = self.watches[variable.index()];
-                        self.watches[variable.index()] = this_rule_id;
-
-                        continue;
-                    } else {
-                        // There are no terms left to watch, so the clause is now a unit clause
-
-                        if w1.eval(&self.decision_map) == Some(false) {
-                            // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
-                            return Err((w1.solvable_id, this_rule_id));
-                        }
-
-                        {
-                            let s = self.pool.resolve_solvable(w1.solvable_id).package();
-                            println!(
-                                "Propagate {} {} = {}",
-                                s.record.name,
-                                s.record.version,
-                                w1.satisfying_value()
-                            );
-                        }
-                        self.decision_map
-                            .set(w1.solvable_id, w1.satisfying_value(), level);
-                        self.decision_queue
-                            .push_back(Decision::new(
-                                w1.solvable_id,
-                                w1.satisfying_value(),
-                            ));
-                        self.decision_queue_why.push_back(this_rule_id);
-
-                        continue;
-                    }
-                } else {
-                    // Both watched literals are still true in this rule
-                    continue;
                 }
             }
         }
@@ -766,7 +740,9 @@ impl Solver {
             }
         }
 
-        let last_literal = self.rules[rule_id.index()].find_literal(s, &self.learnt_rules).invert();
+        let last_literal = self.rules[rule_id.index()]
+            .find_literal(s, &self.learnt_rules)
+            .invert();
         learnt.push(last_literal);
 
         // Add the rule
@@ -774,17 +750,21 @@ impl Solver {
         let learnt_index = self.learnt_rules.len();
         self.learnt_rules.push(learnt.clone());
 
-        let mut rule = Rule::new(RuleKind::Learnt(
-            learnt_index
-        ), &self.learnt_rules, &self.pool);
+        let mut rule = Rule::new(
+            RuleKind::Learnt(learnt_index),
+            &self.learnt_rules,
+            &self.pool,
+        );
 
         // Hook the rule up to the watches
         if rule.has_watches() {
-            rule.n1 = self.watches[rule.w1.index()];
-            self.watches[rule.w1.index()] = rule_id;
+            let w1 = self.pool.solvables.len() + rule.watched_literals[0].index();
+            rule.link_to_rule(0, self.watches[w1]);
+            self.watches[w1] = rule_id;
 
-            rule.n2 = self.watches[rule.w2.index()];
-            self.watches[rule.w2.index()] = rule_id;
+            let w2 = self.pool.solvables.len() + rule.watched_literals[1].index();
+            rule.link_to_rule(1, self.watches[w2]);
+            self.watches[w2] = rule_id;
         }
 
         // Store it
@@ -849,13 +829,13 @@ impl Solver {
                 continue;
             }
 
-            let w1_solvable_index = self.pool.solvables.len() + rule.w1.index();
-            rule.n1 = self.watches[w1_solvable_index];
-            self.watches[w1_solvable_index] = RuleId::new(i);
+            let w1 = self.pool.solvables.len() + rule.watched_literals[0].index();
+            rule.link_to_rule(0, self.watches[w1]);
+            self.watches[w1] = RuleId::new(i);
 
-            let w2_solvable_index = self.pool.solvables.len() + rule.w2.index();
-            rule.n2 = self.watches[w2_solvable_index];
-            self.watches[w2_solvable_index] = RuleId::new(i);
+            let w2 = self.pool.solvables.len() + rule.watched_literals[1].index();
+            rule.link_to_rule(1, self.watches[w2]);
+            self.watches[w2] = RuleId::new(i);
         }
     }
 }
@@ -993,15 +973,15 @@ mod test {
         assert_eq!(solved.steps.len(), 3);
 
         let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "conflicting");
+        assert_eq!(solvable.record.version.to_string(), "1.0.0");
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
         assert_eq!(solvable.record.name, "asdf");
         assert_eq!(solvable.record.version.to_string(), "1.2.3");
 
-        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
+        let solvable = solver.pool.resolve_solvable(solved.steps[2].0).package();
         assert_eq!(solvable.record.name, "efgh");
         assert_eq!(solvable.record.version.to_string(), "4.5.7");
-
-        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
-        assert_eq!(solvable.record.name, "conflicting");
-        assert_eq!(solvable.record.version.to_string(), "1.0.0");
     }
 }

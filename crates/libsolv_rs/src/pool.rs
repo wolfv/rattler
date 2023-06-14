@@ -38,7 +38,7 @@ impl StringId {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MatchSpecId(u32);
 
 impl MatchSpecId {
