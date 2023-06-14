@@ -1,4 +1,4 @@
-use crate::pool::{MatchSpecId, RepoId, StringId};
+use crate::pool::{MatchSpecId, Pool, RepoId, StringId};
 use rattler_conda_types::PackageRecord;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
@@ -29,6 +29,15 @@ impl SolvableId {
 pub enum Solvable {
     Root(Vec<MatchSpecId>),
     Package(PackageSolvable),
+}
+
+impl Solvable {
+    pub(crate) fn debug(&self) {
+        match self {
+            Solvable::Root(_) => print!("root"),
+            Solvable::Package(p) => print!("{} {}", p.record.name, p.record.version),
+        }
+    }
 }
 
 pub struct PackageSolvable {

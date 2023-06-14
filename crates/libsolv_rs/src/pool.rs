@@ -279,6 +279,10 @@ impl Pool {
         }
     }
 
+    pub fn resolve_match_spec(&self, id: MatchSpecId) -> &MatchSpec {
+        &self.match_specs[id.index()]
+    }
+
     pub fn root_solvable_mut(&mut self) -> &mut Vec<MatchSpecId> {
         match &mut self.solvables[0] {
             Solvable::Root(ids) => ids,

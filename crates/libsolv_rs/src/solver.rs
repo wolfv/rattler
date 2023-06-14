@@ -4,8 +4,8 @@ use crate::solvable::{Solvable, SolvableId};
 use crate::solve_jobs::{CandidateSource, SolveJobs, SolveOperation};
 use crate::solve_problem::SolveProblem;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 #[derive(Copy, Clone, PartialOrd, Ord, Eq, PartialEq)]
@@ -30,38 +30,14 @@ impl RuleId {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
-enum Decision {
-    Decided(Decided),
-    Undecided,
-}
-
-impl Decision {
-    fn decided(self) -> Decided {
-        match self {
-            Decision::Decided(d) => d,
-            Decision::Undecided => panic!("undecided!"),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq)]
-struct Decided {
-    solvable: SolvableId,
+struct Decision {
+    solvable_id: SolvableId,
     value: bool,
 }
 
-impl Decided {
+impl Decision {
     fn new(solvable: SolvableId, value: bool) -> Self {
-        Self { solvable, value }
-    }
-
-    fn negate(mut self) -> Self {
-        self.value = !self.value;
-        self
-    }
-
-    fn index(self) -> usize {
-        self.solvable.index()
+        Self { solvable_id: solvable, value }
     }
 }
 
@@ -111,8 +87,16 @@ impl DecisionMap {
         }
     }
 
+    pub fn reset(&mut self, solvable_id: SolvableId) {
+        self.map[solvable_id.index()] = 0;
+    }
+
     pub fn set(&mut self, solvable_id: SolvableId, value: bool, level: u32) {
         self.map[solvable_id.index()] = if value { level as i64 } else { -(level as i64) };
+    }
+
+    pub fn level(&mut self, solvable_id: SolvableId) -> u32 {
+        self.map[solvable_id.index()].abs() as u32
     }
 
     pub fn value(&self, solvable_id: SolvableId) -> Option<bool> {
@@ -133,6 +117,8 @@ pub struct Solver {
     rules: Vec<Rule>,
     watches: Vec<RuleId>,
 
+    learnt_rules: Vec<Vec<Literal>>,
+
     // All assertion rules
     rule_assertions: VecDeque<RuleId>,
 
@@ -143,8 +129,7 @@ pub struct Solver {
     learnt_rules_start: RuleId,
 
     decision_map: DecisionMap,
-    installed_by_name: HashMap<StringId, SolvableId>,
-    name_rules: HashMap<StringId, RuleId>,
+    // name_rules: HashMap<StringId, RuleId>,
 
     /* list of lists of conflicting rules, < 0 for job rules */
     problems: VecDeque<()>,
@@ -173,8 +158,9 @@ impl Solver {
         Self {
             propagate_index: 0,
 
-            rules: vec![Rule::new(RuleKind::InstallRoot, &pool)],
+            rules: vec![Rule::new(RuleKind::InstallRoot, &[], &pool)],
             watches: Vec::new(),
+            learnt_rules: Vec::new(),
             rule_assertions: VecDeque::from([RuleId::new(0)]),
             decision_queue: VecDeque::new(),
             decision_queue_why: VecDeque::new(),
@@ -183,8 +169,7 @@ impl Solver {
             learnt_rules_start: RuleId(0),
 
             decision_map: DecisionMap::new(pool.nsolvables()),
-            installed_by_name: HashMap::default(),
-            name_rules: HashMap::default(),
+            // name_rules: HashMap::default(),
             problems: VecDeque::new(),
 
             config: Config::default(),
@@ -243,11 +228,14 @@ impl Solver {
         }
 
         // Initialize rules ensuring only a single candidate per package name is installed
-        for (name_id, _) in &self.pool.packages_by_name {
-            let &name_id = name_id;
-            let rule_id = RuleId::new(self.rules.len());
-            self.rules.push(Rule::new(RuleKind::SameName(name_id), &self.pool));
-            self.name_rules.insert(name_id, rule_id);
+        for (name_id, candidates) in &self.pool.packages_by_name {
+            // Each candidate gets a rule with each other candidate
+            for (i, &candidate) in candidates.iter().enumerate() {
+                for &other_candidate in &candidates[i + 1..] {
+                    self.rules
+                        .push(Rule::new(RuleKind::SameName(candidate, other_candidate), &self.learnt_rules, &self.pool));
+                }
+            }
         }
 
         // All new rules are learnt after this point
@@ -271,9 +259,8 @@ impl Solver {
                 .decision_queue
                 .iter()
                 .flat_map(|d| {
-                    let decided = d.decided();
-                    if decided.value && decided.solvable != SolvableId::root() {
-                        Some((decided.solvable, TransactionKind::Install))
+                    if d.value && d.solvable_id != SolvableId::root() {
+                        Some((d.solvable_id, TransactionKind::Install))
                     } else {
                         // Ignore things that are set to false
                         None
@@ -342,7 +329,7 @@ impl Solver {
 
                 // Create requires rule
                 self.rules
-                    .push(Rule::new(RuleKind::Requires(candidate, dep), &self.pool));
+                    .push(Rule::new(RuleKind::Requires(candidate, dep), &self.learnt_rules, &self.pool));
             }
 
             // Constrains
@@ -359,13 +346,14 @@ impl Solver {
                 if !dep_forbidden.is_empty() {
                     // Only add the "constrains" if it actually forbids packages
                     self.rules
-                        .push(Rule::new(RuleKind::Constrains(candidate, dep), &self.pool));
+                        .push(Rule::new(RuleKind::Constrains(candidate, dep), &self.learnt_rules, &self.pool));
                 }
             }
         }
 
         self.rules.push(Rule::new(
             RuleKind::Requires(SolvableId::root(), dep),
+            &self.learnt_rules,
             &self.pool,
         ));
     }
@@ -381,6 +369,8 @@ impl Solver {
         let mut root_level = 1;
 
         loop {
+            println!("=== New SAT round at level {level}");
+
             // First rule decision
             if level == 0 {
                 level = match self.install_root_solvable() {
@@ -388,11 +378,17 @@ impl Solver {
                     Err(_) => break,
                 };
 
-                if let Err(cause) = self.propagate(level) {
+                println!("=== Root solvable installed at level {level}");
+
+                if let Err((_, cause)) = self.propagate(level) {
+                    println!("=== Propagate failed... HOW?");
                     self.analyze_unsolvable(cause, false);
                     continue;
                 }
 
+                // Why would we increase the root level? Maybe if we have assertions that are
+                // unavoidable, but still want to make a distinction between them and installing
+                // root?
                 root_level = level + 1;
             }
 
@@ -400,7 +396,7 @@ impl Solver {
             let original_level = level;
             level = self.resolve_dependencies(level);
 
-            // TODO: come up with a way to know when we are done
+            // TODO: if we are always returning, do we need a loop? What is libsolv doing?
             return;
         }
     }
@@ -409,12 +405,12 @@ impl Solver {
         assert!(self.decision_queue.is_empty());
 
         self.decision_queue
-            .push_back(Decision::Decided(Decided::new(SolvableId::root(), true)));
+            .push_back(Decision::new(SolvableId::root(), true));
         self.decision_queue_why.push_back(RuleId::new(0));
 
-        // TODO: why do we push twice here?
-        self.decision_queue_reason.push_back(0);
-        self.decision_queue_reason.push_back(0);
+        // TODO: why do we push twice here? Why push at all?
+        // self.decision_queue_reason.push_back(0);
+        // self.decision_queue_reason.push_back(0);
 
         self.decision_map.set(SolvableId::root(), true, 1);
 
@@ -450,8 +446,13 @@ impl Solver {
                 }
 
                 // Consider only rules in which no candidates have been installed
-                let candidates = self.pool.match_spec_to_candidates[deps.index()].as_deref().unwrap();
-                if candidates.iter().any(|&c| self.decision_map.value(c) == Some(true)) {
+                let candidates = self.pool.match_spec_to_candidates[deps.index()]
+                    .as_deref()
+                    .unwrap();
+                if candidates
+                    .iter()
+                    .any(|&c| self.decision_map.value(c) == Some(true))
+                {
                     continue;
                 }
 
@@ -459,7 +460,11 @@ impl Solver {
                 //
                 // This assumes that the packages have been provided in the right order when the solvables were created
                 // (most recent packages first)
-                candidates.iter().cloned().find(|&c| self.decision_map.value(c).is_none()).unwrap()
+                candidates
+                    .iter()
+                    .cloned()
+                    .find(|&c| self.decision_map.value(c).is_none())
+                    .unwrap()
             };
 
             // Assumption: there are multiple candidates, otherwise this would have already been handled
@@ -480,35 +485,51 @@ impl Solver {
         level
     }
 
-    fn set_propagate_learn(&mut self, mut level: u32, solvable: SolvableId, disable_rules: bool, rule_id: RuleId) -> u32 {
+    fn set_propagate_learn(
+        &mut self,
+        mut level: u32,
+        solvable: SolvableId,
+        disable_rules: bool,
+        rule_id: RuleId,
+    ) -> u32 {
         let s = self.pool.resolve_solvable(solvable).package();
         let name = self.pool.resolve_string(s.name);
         let version = self.pool.resolve_string(s.version);
-        println!("Attempting to install {name} {version}");
 
         level += 1;
+        println!("=== Set {name} = {version} at level {level}");
         self.decision_map.set(solvable, true, level);
-        self.decision_queue.push_back(Decision::Decided(Decided::new(solvable, true)));
+        self.decision_queue
+            .push_back(Decision::new(solvable, true));
         self.decision_queue_why.push_back(rule_id);
 
         loop {
             let r = self.propagate(level);
-            let Err(rule_id) = r else {
+            let Err((conflicting_solvable, conflicting_rule)) = r else {
                 // Propagation succeeded
                 break;
             };
 
             if level == 1 {
-                return self.analyze_unsolvable(rule_id, disable_rules);
+                return self.analyze_unsolvable(conflicting_rule, disable_rules);
             }
 
-            let (new_level, learned_rule_id, literal) = self.analyze(rule_id);
+            let (new_level, learned_rule_id, literal) =
+                self.analyze(level, conflicting_solvable, conflicting_rule);
             level = new_level;
 
+            // Optimization: propagate right now, since we know that the rule is a unit clause
             let decision = literal.satisfying_value();
             self.decision_map.set(literal.solvable_id, decision, level);
-            self.decision_queue.push_back(Decision::Decided(Decided::new(literal.solvable_id, decision)));
+            self.decision_queue
+                .push_back(Decision::new(
+                    literal.solvable_id,
+                    decision,
+                ));
             self.decision_queue_why.push_back(learned_rule_id);
+            print!("=== Propagate after learn: ");
+            self.pool.resolve_solvable(literal.solvable_id).debug();
+            println!(" = {decision}");
         }
 
         level
@@ -518,21 +539,13 @@ impl Solver {
         // TODO: we should probably keep info here for backtracking
     }
 
-    fn propagate(&mut self, level: u32) -> Result<(), RuleId> {
+    fn propagate(&mut self, level: u32) -> Result<(), (SolvableId, RuleId)> {
         while let Some(decision) = self.decision_queue.range(self.propagate_index..).next() {
             self.propagate_index += 1;
 
-            let pkg = decision.decided().solvable;
+            let pkg = decision.solvable_id;
 
-            // Ensure the package is only installed once
-            if let Solvable::Package(solvable) = self.pool.resolve_solvable(pkg) {
-                match self.installed_by_name.entry(solvable.name) {
-                    Entry::Occupied(_) => return Err(self.name_rules[&solvable.name]),
-                    Entry::Vacant(e) => e.insert(pkg),
-                };
-            }
-
-            // Iterate through the linked list of rules that watch this solvable
+            // Propagate, iterating through the linked list of rules that watch this solvable
             let mut prev_rule_id: Option<RuleId> = None;
             let mut rule_id = self.watches[self.pool.solvables.len() + pkg.index()];
             while !rule_id.is_null() {
@@ -570,11 +583,11 @@ impl Solver {
                 }
 
                 // TODO: The code below is duplicated for the w1 and w2 case, we should deduplicate it
-                let (w1, w2) = rule.watched_literals();
+                let (w1, w2) = rule.watched_literals(&self.learnt_rules);
                 if pkg == w1.solvable_id && w1.eval(&self.decision_map) == Some(false) {
                     // The first literal is now false!
                     if let Some(variable) =
-                        rule.next_unwatched_variable(&self.pool, &self.decision_map)
+                        rule.next_unwatched_variable(&self.pool, &self.learnt_rules, &self.decision_map)
                     {
                         rule.w1 = variable;
 
@@ -601,16 +614,25 @@ impl Solver {
 
                         if w2.eval(&self.decision_map) == Some(false) {
                             // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
-                            return Err(this_rule_id);
+                            return Err((w2.solvable_id, this_rule_id));
                         }
 
+                        {
+                            let s = self.pool.resolve_solvable(w2.solvable_id).package();
+                            println!(
+                                "Propagate {} {} = {}",
+                                s.record.name,
+                                s.record.version,
+                                w2.satisfying_value()
+                            );
+                        }
                         self.decision_map
                             .set(w2.solvable_id, w2.satisfying_value(), level);
                         self.decision_queue
-                            .push_back(Decision::Decided(Decided::new(
+                            .push_back(Decision::new(
                                 w2.solvable_id,
                                 w2.satisfying_value(),
-                            )));
+                            ));
                         self.decision_queue_why.push_back(this_rule_id);
 
                         continue;
@@ -618,7 +640,7 @@ impl Solver {
                 } else if pkg == w2.solvable_id && w2.eval(&self.decision_map) == Some(false) {
                     // The second literal is now false!
                     if let Some(variable) =
-                        rule.next_unwatched_variable(&self.pool, &self.decision_map)
+                        rule.next_unwatched_variable(&self.pool, &self.learnt_rules, &self.decision_map)
                     {
                         rule.w2 = variable;
 
@@ -645,16 +667,25 @@ impl Solver {
 
                         if w1.eval(&self.decision_map) == Some(false) {
                             // Conflict, the remaining watch is already decided and evaluates to false, so we can't set it to true!
-                            return Err(this_rule_id);
+                            return Err((w1.solvable_id, this_rule_id));
                         }
 
+                        {
+                            let s = self.pool.resolve_solvable(w1.solvable_id).package();
+                            println!(
+                                "Propagate {} {} = {}",
+                                s.record.name,
+                                s.record.version,
+                                w1.satisfying_value()
+                            );
+                        }
                         self.decision_map
                             .set(w1.solvable_id, w1.satisfying_value(), level);
                         self.decision_queue
-                            .push_back(Decision::Decided(Decided::new(
+                            .push_back(Decision::new(
                                 w1.solvable_id,
                                 w1.satisfying_value(),
-                            )));
+                            ));
                         self.decision_queue_why.push_back(this_rule_id);
 
                         continue;
@@ -673,8 +704,138 @@ impl Solver {
         todo!()
     }
 
-    fn analyze(&mut self, rule_id: RuleId) -> (u32, RuleId, Literal) {
-        todo!()
+    fn analyze(
+        &mut self,
+        mut current_level: u32,
+        mut s: SolvableId,
+        mut rule_id: RuleId,
+    ) -> (u32, RuleId, Literal) {
+        let solvable = self.pool.resolve_solvable(s).package();
+
+        println!(
+            "=== Conflict: could not set the value for: {} {}",
+            solvable.record.name, solvable.record.version
+        );
+        print!("Triggered by rule: ");
+        self.rules[rule_id.index()].debug(&self.pool);
+
+        let mut seen = HashSet::new();
+        let mut causes_at_current_level = 0u32;
+        let mut learnt = Vec::new();
+        let mut btlevel = 0;
+        loop {
+            let causes =
+                self.rules[rule_id.index()].conflict_causes(s, &self.learnt_rules, &self.pool);
+
+            // Collect literals that imply that `p` should be assigned a given value (triggering a conflict)
+            for cause in causes {
+                if seen.insert(cause.solvable_id) {
+                    let decision_level = self.decision_map.level(cause.solvable_id);
+                    if decision_level == current_level {
+                        causes_at_current_level += 1;
+                    } else if current_level > 1 {
+                        learnt.push(cause.invert());
+                        btlevel = btlevel.max(decision_level);
+                    } else {
+                        // A conflict with a decision at level 1 means the problem is unsatisfiable
+                        // (otherwise we would "learn" that the decision at level 1 was wrong, but
+                        // those decisions are either directly provided by [or derived from] the
+                        // user's input)
+                        panic!("unsolvable");
+                    }
+                }
+            }
+
+            // Select next literal to look at
+            loop {
+                s = self.decision_queue.back().unwrap().solvable_id;
+                rule_id = *self.decision_queue_why.back().unwrap();
+
+                current_level = self.undo_one();
+
+                // We are interested in the first literal we come across that caused the conflicting
+                // assignment
+                if seen.contains(&s) {
+                    break;
+                }
+            }
+
+            causes_at_current_level = causes_at_current_level.saturating_sub(1);
+            if causes_at_current_level == 0 {
+                break;
+            }
+        }
+
+        let last_literal = self.rules[rule_id.index()].find_literal(s, &self.learnt_rules).invert();
+        learnt.push(last_literal);
+
+        // Add the rule
+        let rule_id = RuleId::new(self.rules.len());
+        let learnt_index = self.learnt_rules.len();
+        self.learnt_rules.push(learnt.clone());
+
+        let mut rule = Rule::new(RuleKind::Learnt(
+            learnt_index
+        ), &self.learnt_rules, &self.pool);
+
+        // Hook the rule up to the watches
+        if rule.has_watches() {
+            rule.n1 = self.watches[rule.w1.index()];
+            self.watches[rule.w1.index()] = rule_id;
+
+            rule.n2 = self.watches[rule.w2.index()];
+            self.watches[rule.w2.index()] = rule_id;
+        }
+
+        // Store it
+        self.rules.push(rule);
+
+        println!("Learnt disjunction:");
+        for lit in learnt {
+            let s = self.pool.resolve_solvable(lit.solvable_id).package();
+            let yes_no = if lit.negate { "NOT" } else { "" };
+            println!("- {yes_no} {} {}", s.record.name, s.record.version);
+        }
+
+        // println!("Backtracked from {level} to {btlevel}");
+
+        // print!("Last decision before backtracking: ");
+        // let decision = self.decision_queue.back().unwrap();
+        // self.pool.resolve_solvable(decision.solvable_id).debug();
+        // println!(" = {}", decision.value);
+
+        // Should revert at most to the root level
+        let target_level = btlevel.max(1);
+        self.revert(target_level);
+
+        print!("Last decision after backtracking: ");
+        let decision = self.decision_queue.back().unwrap();
+        self.pool.resolve_solvable(decision.solvable_id).debug();
+        println!(" = {}", decision.value);
+
+        (target_level, rule_id, last_literal)
+    }
+
+    // Unbinds the last decision
+    fn undo_one(&mut self) -> u32 {
+        let decision = self.decision_queue.pop_back().unwrap();
+        self.decision_map.reset(decision.solvable_id);
+        self.decision_queue_why.pop_back();
+
+        self.propagate_index = self.decision_queue.len();
+
+        let top_decision = self.decision_queue.back().unwrap();
+        self.decision_map.level(top_decision.solvable_id)
+    }
+
+    fn revert(&mut self, level: u32) {
+        while let Some(decision) = self.decision_queue.back() {
+            if self.decision_map.level(decision.solvable_id) <= level {
+                break;
+            }
+
+            self.undo_one();
+        }
     }
 
     fn make_watches(&mut self) {
