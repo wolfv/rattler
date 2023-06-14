@@ -38,12 +38,7 @@ impl Rule {
                 let match_spec = pool.resolve_match_spec(match_spec_id).to_string();
                 println!(" requires {match_spec}")
             }
-            RuleKind::Constrains(solvable_id, match_spec_id) => {
-                pool.resolve_solvable(solvable_id).debug();
-                let match_spec = pool.resolve_match_spec(match_spec_id).to_string();
-                println!(" constrains {match_spec}")
-            }
-            RuleKind::SameName(s1, _) => {
+            RuleKind::Forbids(s1, _) => {
                 let name = pool.resolve_solvable(s1).package().record.name.as_str();
                 println!("only one {name} allowed")
             }
@@ -116,7 +111,7 @@ impl Rule {
                     negate,
                 }
             }
-            RuleKind::Constrains(_, _) | RuleKind::SameName(_, _) => Literal {
+            RuleKind::Forbids(_, _) => Literal {
                 solvable_id,
                 negate: true,
             },
@@ -156,7 +151,7 @@ impl Rule {
                     .unwrap();
                 [w1, w2]
             }
-            RuleKind::SameName(_, _) => literals(false, false),
+            RuleKind::Forbids(_, _) => literals(false, false),
             RuleKind::Requires(solvable_id, _) => {
                 if self.watched_literals[0] == solvable_id {
                     literals(false, true)
@@ -166,7 +161,6 @@ impl Rule {
                     literals(true, true)
                 }
             }
-            RuleKind::Constrains(_, _) => literals(false, false),
         }
     }
 
@@ -191,7 +185,7 @@ impl Rule {
                 .cloned()
                 .find(|&l| can_watch(l))
                 .map(|l| l.solvable_id),
-            RuleKind::SameName(_, _) => None,
+            RuleKind::Forbids(_, _) => None,
             RuleKind::Requires(solvable_id, match_spec_id) => {
                 // The solvable that added this rule
                 let solvable_lit = Literal {
@@ -213,33 +207,6 @@ impl Rule {
                     };
                     if can_watch(lit) {
                         return Some(candidate);
-                    }
-                }
-
-                // No solvable available to watch
-                None
-            }
-            RuleKind::Constrains(solvable_id, match_spec_id) => {
-                // The solvable that added this rule
-                let solvable_lit = Literal {
-                    solvable_id: solvable_id.clone(),
-                    negate: true,
-                };
-                if can_watch(solvable_lit) {
-                    return Some(solvable_id);
-                }
-
-                // The forbidden candidates
-                for &forbidden in pool.match_spec_to_forbidden[match_spec_id.index()]
-                    .as_deref()
-                    .unwrap()
-                {
-                    let lit = Literal {
-                        solvable_id: forbidden,
-                        negate: true,
-                    };
-                    if can_watch(lit) {
-                        return Some(forbidden);
                     }
                 }
 
@@ -283,27 +250,7 @@ impl Rule {
                 .filter(|&l| solvable_id != l.solvable_id)
                 .collect()
             }
-            RuleKind::Constrains(solvable_id, match_spec_id) => {
-                // All variables contribute to the conflict
-                std::iter::once(Literal {
-                    solvable_id: variable,
-                    negate: true,
-                })
-                .chain(
-                    pool.match_spec_to_candidates[match_spec_id.index()]
-                        .as_deref()
-                        .unwrap()
-                        .iter()
-                        .cloned()
-                        .map(|solvable_id| Literal {
-                            solvable_id,
-                            negate: true,
-                        }),
-                )
-                .filter(|&l| solvable_id != l.solvable_id)
-                .collect()
-            }
-            RuleKind::SameName(s1, s2) => {
+            RuleKind::Forbids(s1, s2) => {
                 let cause = if variable == s1 { s2 } else { s1 };
 
                 vec![Literal {
@@ -354,15 +301,13 @@ pub enum RuleKind {
     /// In SAT terms: (¬A ∨ B1 ∨ B2 ∨ ... ∨ B99), where B1 to B99 represent the possible candidates
     /// for the provided match spec.
     Requires(SolvableId, MatchSpecId),
-    /// The solvable forbids the candidates outside of the match spec
+    /// The left solvable forbids installing the right solvable
     ///
-    /// In SAT terms: (¬A ∨ ¬B1 ∨ ¬B2 ∨ ... ∨ ¬B99), where B1 to B99 represent the candidates
-    /// outside of the provided match spec.
-    Constrains(SolvableId, MatchSpecId),
-    /// Only one of the solvables may be installed
+    /// Used to ensure only a single version of a package is installed, and also to express
+    /// constrains
     ///
     /// In SAT terms: (¬A ∨ ¬B)
-    SameName(SolvableId, SolvableId),
+    Forbids(SolvableId, SolvableId),
     /// Learned rule
     Learnt(usize),
 }
@@ -375,7 +320,7 @@ impl RuleKind {
     ) -> Option<[SolvableId; 2]> {
         match self {
             RuleKind::InstallRoot => None,
-            RuleKind::SameName(s1, s2) => Some([*s1, *s2]),
+            RuleKind::Forbids(s1, s2) => Some([*s1, *s2]),
             RuleKind::Learnt(index) => {
                 let literals = &learnt_rules[*index];
                 debug_assert!(literals.len() >= 1);
@@ -390,20 +335,15 @@ impl RuleKind {
                 }
             }
             RuleKind::Requires(id, match_spec) => {
-                let &first_candidate = pool.match_spec_to_candidates[match_spec.index()]
+                let candidates = pool.match_spec_to_candidates[match_spec.index()]
                     .as_ref()
-                    .unwrap()
-                    .iter()
-                    .next()?;
-                Some([*id, first_candidate])
-            }
-            RuleKind::Constrains(id, match_spec) => {
-                let &first_candidate = pool.match_spec_to_forbidden[match_spec.index()]
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .next()?;
-                Some([*id, first_candidate])
+                    .unwrap();
+
+                if candidates.is_empty() {
+                    None
+                } else {
+                    Some([*id, candidates[0]])
+                }
             }
         }
     }

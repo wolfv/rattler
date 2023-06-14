@@ -192,7 +192,7 @@ impl Solver {
             for (i, &candidate) in candidates.iter().enumerate() {
                 for &other_candidate in &candidates[i + 1..] {
                     self.rules.push(Rule::new(
-                        RuleKind::SameName(candidate, other_candidate),
+                        RuleKind::Forbids(candidate, other_candidate),
                         &self.learnt_rules,
                         &self.pool,
                     ));
@@ -238,7 +238,7 @@ impl Solver {
     fn add_rules_for_root_dep(&mut self, visited: &mut HashSet<SolvableId>, dep: MatchSpecId) {
         let mut candidate_stack = Vec::new();
 
-        // Initialize candidate stack
+        // Gather direct candidates for the dependency
         {
             let candidates = Pool::get_candidates(
                 &self.pool.match_specs,
@@ -253,15 +253,9 @@ impl Solver {
                     candidate_stack.push(candidate);
                 }
             }
-
-            // TODO: gracefully handle this (e.g. after the root decision, add a decision setting the SolvableId to false)
-            if candidates.is_empty() {
-                let ms = self.pool.match_specs[dep.index()].to_string();
-                panic!("No candidates for matchspec: {ms}");
-            }
         }
 
-        // Process candidates, adding them recursively
+        // Process candidates, adding their dependencies recursively
         while let Some(candidate) = candidate_stack.pop() {
             let solvable = self.pool.solvables[candidate.index()].package();
 
@@ -283,12 +277,6 @@ impl Solver {
                     }
                 }
 
-                // TODO: gracefully handle this (e.g. after the root decision, add a decision setting the SolvableId to false)
-                if dep_candidates.is_empty() {
-                    let ms = self.pool.match_specs[dep.index()].to_string();
-                    panic!("No candidates for matchspec: {ms}");
-                }
-
                 // Create requires rule
                 self.rules.push(Rule::new(
                     RuleKind::Requires(candidate, dep),
@@ -306,12 +294,12 @@ impl Solver {
                     &self.pool.packages_by_name,
                     &mut self.pool.match_spec_to_forbidden,
                     dep,
-                );
+                )
+                .to_vec();
 
-                if !dep_forbidden.is_empty() {
-                    // Only add the "constrains" if it actually forbids packages
+                for dep in dep_forbidden {
                     self.rules.push(Rule::new(
-                        RuleKind::Constrains(candidate, dep),
+                        RuleKind::Forbids(candidate, dep),
                         &self.learnt_rules,
                         &self.pool,
                     ));
@@ -319,6 +307,7 @@ impl Solver {
             }
         }
 
+        // Root has a requirement on this match spec
         self.rules.push(Rule::new(
             RuleKind::Requires(SolvableId::root(), dep),
             &self.learnt_rules,
@@ -330,6 +319,11 @@ impl Solver {
         let level = match self.install_root_solvable() {
             Ok(new_level) => new_level,
             Err(_) => panic!("install root solvable failed"),
+        };
+
+        let level = match self.decide_assertions(level) {
+            Ok(new_level) => new_level,
+            Err(_) => panic!("propagate assertions failed"),
         };
 
         if let Err((_, cause)) = self.propagate(level) {
@@ -355,6 +349,28 @@ impl Solver {
         self.decision_map.set(SolvableId::root(), true, 1);
 
         Ok(1)
+    }
+
+    fn decide_assertions(&mut self, level: u32) -> Result<u32, ()> {
+        println!("=== Deciding assertions");
+
+        // Currently, the only assertions we have are requirements that cannot be fulfilled
+        for (i, rule) in self.rules.iter().enumerate() {
+            if let RuleKind::Requires(solvable_id, _) = rule.kind {
+                if !rule.has_watches() {
+                    // A requires rule without watches means it has a single literal (i.e.
+                    // there are no candidates)
+                    self.decision_queue
+                        .push_back(Decision::new(solvable_id, false));
+                    self.decision_queue_why.push_back(RuleId::new(i));
+
+                    let s = self.pool.resolve_solvable(solvable_id).package();
+                    println!("Set {} {} = {}", s.record.name, s.record.version, false);
+                }
+            }
+        }
+
+        Ok(level)
     }
 
     /// Resolves all dependencies
