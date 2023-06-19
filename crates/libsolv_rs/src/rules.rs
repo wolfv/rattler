@@ -308,7 +308,7 @@ pub enum RuleKind {
     ///
     /// In SAT terms: (¬A ∨ ¬B)
     Forbids(SolvableId, SolvableId),
-    /// Learned rule
+    /// Learnt rule
     Learnt(usize),
 }
 
