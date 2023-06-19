@@ -456,7 +456,7 @@ impl Solver {
     ) -> u32 {
         level += 1;
 
-        print!(
+        println!(
             "=== Install {} at level {level}",
             self.pool.resolve_solvable(solvable).display()
         );
