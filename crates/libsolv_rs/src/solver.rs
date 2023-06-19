@@ -326,7 +326,7 @@ impl Solver {
             Err(_) => panic!("propagate assertions failed"),
         };
 
-        if let Err((_, cause)) = self.propagate(level) {
+        if let Err((_, _, cause)) = self.propagate(level) {
             self.analyze_unsolvable(cause, false);
             panic!("Propagate after installing root failed");
         }
@@ -467,7 +467,7 @@ impl Solver {
 
         loop {
             let r = self.propagate(level);
-            let Err((conflicting_solvable, conflicting_rule)) = r else {
+            let Err((conflicting_solvable, attempted_value, conflicting_rule)) = r else {
                 // Propagation succeeded
                 println!("=== Propagation succeeded");
                 break;
@@ -475,7 +475,7 @@ impl Solver {
 
             {
                 let solvable = self.pool.resolve_solvable(conflicting_solvable).display();
-                println!("=== Propagation conflicted: could not set the value for: {solvable}");
+                println!("=== Propagation conflicted: could not set {solvable} to {attempted_value}");
                 print!("Triggered by rule: ");
                 self.rules[conflicting_rule.index()].debug(&self.pool);
             }
@@ -519,7 +519,7 @@ impl Solver {
         // TODO: we should probably keep info here for backtracking
     }
 
-    fn propagate(&mut self, level: u32) -> Result<(), (SolvableId, RuleId)> {
+    fn propagate(&mut self, level: u32) -> Result<(), (SolvableId, bool, RuleId)> {
         // Learnt assertions
         let learnt_rules_start = self.learnt_rules_start.index();
         for (i, rule) in self.rules[learnt_rules_start..].iter().enumerate() {
@@ -543,7 +543,7 @@ impl Solver {
                     continue;
                 } else {
                     // Conflict!
-                    return Err((literal.solvable_id, rule_id));
+                    return Err((literal.solvable_id, decision, rule_id));
                 }
             }
 
@@ -643,7 +643,7 @@ impl Solver {
                             // Nothing to do, already decided to true
                             Some(true) => continue,
                             // Conflict, already decided to false, so we can't set it to true!
-                            Some(false) => return Err((remaining_watch.solvable_id, this_rule_id)),
+                            Some(false) => return Err((remaining_watch.solvable_id, true, this_rule_id)),
                             None => (),
                         }
 
@@ -953,16 +953,16 @@ mod test {
         assert_eq!(solved.steps.len(), 3);
 
         let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "efgh");
+        assert_eq!(solvable.record.version.to_string(), "4.5.7");
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
         assert_eq!(solvable.record.name, "conflicting");
         assert_eq!(solvable.record.version.to_string(), "1.0.0");
 
-        let solvable = solver.pool.resolve_solvable(solved.steps[1].0).package();
+        let solvable = solver.pool.resolve_solvable(solved.steps[2].0).package();
         assert_eq!(solvable.record.name, "asdf");
         assert_eq!(solvable.record.version.to_string(), "1.2.3");
-
-        let solvable = solver.pool.resolve_solvable(solved.steps[2].0).package();
-        assert_eq!(solvable.record.name, "efgh");
-        assert_eq!(solvable.record.version.to_string(), "4.5.7");
     }
 
     #[test]
