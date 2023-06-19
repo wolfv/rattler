@@ -369,6 +369,7 @@ impl Solver {
                     self.decision_queue
                         .push_back(Decision::new(solvable_id, false));
                     self.decision_queue_why.push_back(RuleId::new(i));
+                    self.decision_map.set(solvable_id, false, level);
 
                     let s = self.pool.resolve_solvable(solvable_id).package();
                     println!("Set {} {} = {}", s.record.name, s.record.version, false);
@@ -465,10 +466,14 @@ impl Solver {
             let r = self.propagate(level);
             let Err((conflicting_solvable, conflicting_rule)) = r else {
                 // Propagation succeeded
+                println!("=== Propagation succeeded");
                 break;
             };
 
+            println!("=== Propagation conflicted");
+
             if level == 1 {
+                // Is it really unsolvable if we are back to level 1?
                 return self.analyze_unsolvable(conflicting_rule, disable_rules);
             }
 
@@ -495,6 +500,48 @@ impl Solver {
     }
 
     fn propagate(&mut self, level: u32) -> Result<(), (SolvableId, RuleId)> {
+        // Learnt assertions
+        let learnt_rules_start = self.learnt_rules_start.index();
+        for (i, rule) in self.rules[learnt_rules_start..].iter().enumerate() {
+            let RuleKind::Learnt(learnt_index) = rule.kind else {
+                unreachable!();
+            };
+
+            let literals = &self.learnt_rules[learnt_index];
+            if literals.len() > 1 {
+                continue;
+            }
+
+            debug_assert!(!literals.is_empty());
+
+            let literal = literals[0];
+            let decision = literal.satisfying_value();
+            let rule_id = RuleId::new(learnt_rules_start + i);
+            if let Some(value) = self.decision_map.value(literal.solvable_id) {
+                if value == decision {
+                    // Already decided
+                    continue;
+                } else {
+                    // Conflict!
+                    return Err((literal.solvable_id, rule_id));
+                }
+            }
+
+            {
+                let s = self.pool.resolve_solvable(literal.solvable_id).package();
+                println!(
+                    "Propagate learned {} {} = {}",
+                    s.record.name, s.record.version, decision
+                );
+            }
+
+            self.decision_map.set(literal.solvable_id, decision, level);
+            self.decision_queue
+                .push_back(Decision::new(literal.solvable_id, decision));
+            self.decision_queue_why.push_back(rule_id);
+        }
+
+        // Watched literals
         while let Some(decision) = self.decision_queue.range(self.propagate_index..).next() {
             self.propagate_index += 1;
 
@@ -906,5 +953,22 @@ mod test {
         let solvable = solver.pool.resolve_solvable(solved.steps[2].0).package();
         assert_eq!(solvable.record.name, "efgh");
         assert_eq!(solvable.record.version.to_string(), "4.5.7");
+    }
+
+    #[test]
+    fn test_resolve_with_nonexisting() {
+        let pool = pool(&[
+            ("asdf", "1.2.4", vec!["b"]),
+            ("asdf", "1.2.3", vec![]),
+            ("b", "1.2.3", vec!["idontexist"]),
+        ]);
+        let mut solver = Solver::new(pool);
+        let solved = solver.solve(install(&["asdf"])).unwrap();
+
+        assert_eq!(solved.steps.len(), 1);
+
+        let solvable = solver.pool.resolve_solvable(solved.steps[0].0).package();
+        assert_eq!(solvable.record.name, "asdf");
+        assert_eq!(solvable.record.version.to_string(), "1.2.3");
     }
 }
