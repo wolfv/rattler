@@ -1,5 +1,6 @@
 use crate::pool::{MatchSpecId, RepoId, StringId};
-use rattler_conda_types::PackageRecord;
+use rattler_conda_types::{PackageRecord, Version};
+use std::fmt::{Display, Formatter};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct SolvableId(u32);
@@ -35,8 +36,46 @@ impl Solvable {
     pub(crate) fn debug(&self) {
         match self {
             Solvable::Root(_) => print!("root"),
-            Solvable::Package(p) => print!("{} {}", p.record.name, p.record.version),
+            Solvable::Package(p) => {
+                print!("{} {} {}", p.record.name, p.record.version, p.record.build)
+            }
         }
+    }
+
+    pub(crate) fn display(&self) -> SolvableDisplay {
+        match self {
+            Solvable::Root(_) => SolvableDisplay {
+                name: "root",
+                version: None,
+                build: None,
+            },
+            Solvable::Package(p) => SolvableDisplay {
+                name: &p.record.name,
+                version: Some(&p.record.version),
+                build: Some(&p.record.build),
+            },
+        }
+    }
+}
+
+pub struct SolvableDisplay<'a> {
+    name: &'a str,
+    version: Option<&'a Version>,
+    build: Option<&'a str>,
+}
+
+impl Display for SolvableDisplay<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(version) = self.version {
+            write!(f, " {}", version)?;
+        }
+
+        if let Some(build) = self.build {
+            write!(f, " {}", build)?;
+        }
+
+        Ok(())
     }
 }
 

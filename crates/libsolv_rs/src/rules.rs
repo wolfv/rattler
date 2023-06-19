@@ -233,7 +233,7 @@ impl Rule {
             RuleKind::Requires(solvable_id, match_spec_id) => {
                 // All variables contribute to the conflict
                 std::iter::once(Literal {
-                    solvable_id: variable,
+                    solvable_id,
                     negate: true,
                 })
                 .chain(
@@ -247,7 +247,7 @@ impl Rule {
                             negate: false,
                         }),
                 )
-                .filter(|&l| solvable_id != l.solvable_id)
+                .filter(|&l| variable != l.solvable_id)
                 .collect()
             }
             RuleKind::Forbids(s1, s2) => {

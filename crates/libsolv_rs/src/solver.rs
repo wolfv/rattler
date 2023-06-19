@@ -371,8 +371,10 @@ impl Solver {
                     self.decision_queue_why.push_back(RuleId::new(i));
                     self.decision_map.set(solvable_id, false, level);
 
-                    let s = self.pool.resolve_solvable(solvable_id).package();
-                    println!("Set {} {} = {}", s.record.name, s.record.version, false);
+                    println!(
+                        "Set {} = false",
+                        self.pool.resolve_solvable(solvable_id).display()
+                    );
                 }
             }
         }
@@ -452,12 +454,13 @@ impl Solver {
         disable_rules: bool,
         rule_id: RuleId,
     ) -> u32 {
-        let s = self.pool.resolve_solvable(solvable).package();
-        let name = self.pool.resolve_string(s.name);
-        let version = self.pool.resolve_string(s.version);
-
         level += 1;
-        println!("=== Set {name} = {version} at level {level}");
+
+        print!(
+            "=== Install {} at level {level}",
+            self.pool.resolve_solvable(solvable).display()
+        );
+
         self.decision_map.set(solvable, true, level);
         self.decision_queue.push_back(Decision::new(solvable, true));
         self.decision_queue_why.push_back(rule_id);
@@ -470,10 +473,27 @@ impl Solver {
                 break;
             };
 
-            println!("=== Propagation conflicted");
+            {
+                let solvable = self.pool.resolve_solvable(conflicting_solvable).display();
+                println!("=== Propagation conflicted: could not set the value for: {solvable}");
+                print!("Triggered by rule: ");
+                self.rules[conflicting_rule.index()].debug(&self.pool);
+            }
 
             if level == 1 {
                 // Is it really unsolvable if we are back to level 1?
+                println!("=== UNSOLVABLE");
+                for (decision, rule_id) in self.decision_queue.iter().zip(&self.decision_queue_why)
+                {
+                    let level = self.decision_map.level(decision.solvable_id);
+                    let action = if decision.value { "install" } else { "forbid" };
+                    print!(
+                        "* ({level}) {action} {}",
+                        self.pool.resolve_solvable(decision.solvable_id).display()
+                    );
+                    print!(". Reason: ");
+                    self.rules[rule_id.index()].debug(&self.pool);
+                }
                 return self.analyze_unsolvable(conflicting_rule, disable_rules);
             }
 
@@ -628,14 +648,11 @@ impl Solver {
                         }
 
                         {
-                            let s = self
-                                .pool
-                                .resolve_solvable(remaining_watch.solvable_id)
-                                .package();
                             println!(
-                                "Propagate {} {} = {}",
-                                s.record.name,
-                                s.record.version,
+                                "Propagate {} = {}",
+                                self.pool
+                                    .resolve_solvable(remaining_watch.solvable_id)
+                                    .display(),
                                 remaining_watch.satisfying_value()
                             );
                         }
@@ -667,15 +684,6 @@ impl Solver {
         mut s: SolvableId,
         mut rule_id: RuleId,
     ) -> (u32, RuleId, Literal) {
-        let solvable = self.pool.resolve_solvable(s).package();
-
-        println!(
-            "=== Conflict: could not set the value for: {} {}",
-            solvable.record.name, solvable.record.version
-        );
-        print!("Triggered by rule: ");
-        self.rules[rule_id.index()].debug(&self.pool);
-
         let mut seen = HashSet::new();
         let mut causes_at_current_level = 0u32;
         let mut learnt = Vec::new();
@@ -748,9 +756,11 @@ impl Solver {
 
         println!("Learnt disjunction:");
         for lit in learnt {
-            let s = self.pool.resolve_solvable(lit.solvable_id).package();
-            let yes_no = if lit.negate { "NOT" } else { "" };
-            println!("- {yes_no} {} {}", s.record.name, s.record.version);
+            let yes_no = if lit.negate { "NOT " } else { "" };
+            println!(
+                "- {yes_no}{}",
+                self.pool.resolve_solvable(lit.solvable_id).display()
+            );
         }
 
         // println!("Backtracked from {level} to {btlevel}");
