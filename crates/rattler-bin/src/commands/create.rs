@@ -34,6 +34,9 @@ pub struct Opt {
     #[clap(short)]
     channels: Option<Vec<String>>,
 
+    #[clap(long)]
+    store_json_only: bool,
+
     #[clap(required = true)]
     specs: Vec<String>,
 }
@@ -142,6 +145,20 @@ pub async fn create(opt: Opt) -> anyhow::Result<()> {
     let repodatas = wrap_in_progress("parsing repodata", move || {
         SparseRepoData::load_records_recursive(&sparse_repo_datas, package_names)
     })?;
+
+    if opt.store_json_only {
+        // combine all repodatas into one vector
+        let mut combined = Vec::new();
+        for repodata in repodatas.iter() {
+            combined.extend(repodata);
+        }
+
+        let path = PathBuf::from("repodata.json");
+        let json_contents = serde_json::to_string_pretty(&combined).unwrap();
+        std::fs::write(path, json_contents).unwrap();
+
+        return Ok(());
+    }
 
     // Determine virtual packages of the system. These packages define the capabilities of the
     // system. Some packages depend on these virtual packages to indiciate compability with the
