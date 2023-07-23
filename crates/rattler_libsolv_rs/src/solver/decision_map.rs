@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 /// > 0: level of decision when the solvable is set to true
 /// < 0: level of decision when the solvable is set to false
 #[repr(transparent)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct DecisionAndLevel(i64);
 
 impl DecisionAndLevel {

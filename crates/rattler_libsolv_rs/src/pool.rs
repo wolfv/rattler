@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// A pool that stores data related to the available packages
 ///
@@ -169,6 +170,12 @@ impl<'a> Pool<'a> {
                 )
             })
         });
+
+        println!("{:?}", match_spec);
+        for p in &pkgs {
+            let record = self.solvables[*p].package().record;
+            println!("  {:?} {} {}", record.name, record.version, record.build);
+        }
 
         if let Some(&favored_id) = favored_map.get(&name_id) {
             if let Some(pos) = pkgs.iter().position(|&s| s == favored_id) {

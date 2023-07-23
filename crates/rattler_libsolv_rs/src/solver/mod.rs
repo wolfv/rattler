@@ -1,3 +1,4 @@
+use crate::{RepoId, MatchSpecId};
 use crate::arena::{Arena, ArenaId};
 use crate::id::{ClauseId, SolvableId};
 use crate::id::{LearntClauseId, NameId};
@@ -7,10 +8,13 @@ use crate::problem::Problem;
 use crate::solvable::SolvableInner;
 use crate::solve_jobs::SolveJobs;
 use crate::transaction::Transaction;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::cmp::Ordering;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use itertools::Itertools;
-use rattler_conda_types::MatchSpec;
+use rattler_conda_types::{MatchSpec, Version};
 use std::collections::{HashMap, HashSet};
 
 use clause::{Clause, ClauseState, Literal};
@@ -23,6 +27,13 @@ mod decision;
 mod decision_map;
 mod decision_tracker;
 mod watch_map;
+
+#[cfg(not(test))]
+use tracing::{info, warn};
+ 
+#[cfg(test)]
+use std::{println as info, println as warn};
+
 
 /// Drives the SAT solving process
 ///
@@ -39,11 +50,23 @@ pub struct Solver<'a> {
     learnt_why: Mapping<LearntClauseId, Vec<ClauseId>>,
 
     decision_tracker: DecisionTracker,
+
+    match_spec_to_candidates: Mapping<MatchSpecId, OnceCell<Vec<SolvableId>>>,
+    match_spec_to_highest_version: Mapping<MatchSpecId, OnceCell<Option<(Version, bool)>>>,
+    sorting_cache: HashMap<u64, Ordering>,
+    seen_requires: HashSet<MatchSpecId>,
+    seen_forbidden: HashSet<MatchSpecId>,
+    empty_vec: Vec<SolvableId>,
+    visited: HashSet<SolvableId>,
+    stack: Vec<SolvableId>,
 }
 
 impl<'a> Solver<'a> {
     /// Create a solver, using the provided pool
     pub fn new(pool: Pool<'a>) -> Self {
+        let matchspec_len = pool.match_specs.len();
+        println!("matchspec_len: {}", matchspec_len);
+
         Self {
             clauses: Vec::new(),
             watches: WatchMap::new(),
@@ -52,6 +75,14 @@ impl<'a> Solver<'a> {
             learnt_why: Mapping::empty(),
             decision_tracker: DecisionTracker::new(pool.solvables.len() as u32),
             pool,
+            match_spec_to_candidates: Mapping::new(vec![OnceCell::new(); matchspec_len]),
+            match_spec_to_highest_version: Mapping::new(vec![OnceCell::new(); matchspec_len]),
+            sorting_cache: HashMap::new(),
+            seen_requires: HashSet::new(),
+            seen_forbidden: HashSet::new(),
+            empty_vec: Vec::new(),
+            visited: HashSet::new(),
+            stack: Vec::new(),
         }
     }
 
@@ -158,40 +189,34 @@ impl<'a> Solver<'a> {
     /// dependency are sorted, giving preference to the favored package (i.e. placing it at the
     /// front).
     fn add_clauses_for_root_deps(&mut self, favored_map: &HashMap<NameId, SolvableId>) {
-        let mut visited = HashSet::new();
-        let mut stack = Vec::new();
+        self.stack.push(SolvableId::root());
 
-        stack.push(SolvableId::root());
-
-        let mut match_spec_to_sorted_candidates =
+        println!("add_clauses_for_root_deps {}", self.pool.match_specs.len());
+        let mut match_spec_to_sorted_candidates = 
             Mapping::new(vec![Vec::new(); self.pool.match_specs.len()]);
         let mut match_spec_to_forbidden =
             Mapping::new(vec![Vec::new(); self.pool.match_specs.len()]);
-        let match_spec_to_candidates =
-            Mapping::new(vec![OnceCell::new(); self.pool.match_specs.len()]);
-        let match_spec_to_highest_version =
-            Mapping::new(vec![OnceCell::new(); self.pool.match_specs.len()]);
-        let mut sorting_cache = HashMap::new();
-        let mut seen_requires = HashSet::new();
-        let mut seen_forbidden = HashSet::new();
+        self.match_spec_to_candidates = Mapping::new(vec![OnceCell::new(); self.pool.match_specs.len()]);
+        self.match_spec_to_highest_version = Mapping::new(vec![OnceCell::new(); self.pool.match_specs.len()]);
         let empty_vec = Vec::new();
 
-        while let Some(solvable_id) = stack.pop() {
+        while let Some(solvable_id) = self.stack.pop() {
             let (deps, constrains) = match &self.pool.solvables[solvable_id].inner {
                 SolvableInner::Root(deps) => (deps, &[] as &[_]),
                 SolvableInner::Package(pkg) => (&pkg.dependencies, pkg.constrains.as_slice()),
             };
+            println!("Deps: {:?}", deps);
 
             // Enqueue the candidates of the dependencies
             for &dep in deps {
-                if seen_requires.insert(dep) {
+                if self.seen_requires.insert(dep) {
                     self.pool.populate_candidates(
                         dep,
                         favored_map,
                         &mut match_spec_to_sorted_candidates,
-                        &match_spec_to_candidates,
-                        &match_spec_to_highest_version,
-                        &mut sorting_cache,
+                        &self.match_spec_to_candidates,
+                        &self.match_spec_to_highest_version,
+                        &mut self.sorting_cache,
                     );
                 }
 
@@ -200,9 +225,9 @@ impl<'a> Solver<'a> {
                     .unwrap_or(&empty_vec)
                 {
                     // Note: we skip candidates we have already seen
-                    if visited.insert(candidate) {
-                        stack.push(candidate);
-                    }
+                    // if self.visited.insert(candidate) {
+                    //     self.stack.push(candidate);
+                    // }
                 }
             }
 
@@ -217,7 +242,7 @@ impl<'a> Solver<'a> {
 
             // Constrains
             for &dep in constrains {
-                if seen_forbidden.insert(dep) {
+                if self.seen_forbidden.insert(dep) {
                     self.pool
                         .populate_forbidden(dep, &mut match_spec_to_forbidden);
                 }
@@ -232,8 +257,8 @@ impl<'a> Solver<'a> {
             }
         }
 
-        self.pool.match_spec_to_sorted_candidates = match_spec_to_sorted_candidates;
         self.pool.match_spec_to_forbidden = match_spec_to_forbidden;
+        self.pool.match_spec_to_sorted_candidates = match_spec_to_sorted_candidates;
     }
 
     /// Run the CDCL algorithm to solve the SAT problem
@@ -280,6 +305,17 @@ impl<'a> Solver<'a> {
         // Propagate after the assignments above
         self.propagate(level)
             .map_err(|(_, _, cause)| self.analyze_unsolvable(cause))?;
+        println!("Decision tracker: {:?}", self.decision_tracker.stack());
+
+        let solvable_ids: Vec<_> = self.decision_tracker.stack()
+            .iter()
+            .filter(|dec| dec.value)
+            .map(|dec| dec.solvable_id)
+            .collect();
+    
+        for new_s in solvable_ids {
+            self.add_clauses_for_solvable(new_s);
+        }
 
         // Enter the solver loop
         self.resolve_dependencies(level)?;
@@ -297,7 +333,7 @@ impl<'a> Solver<'a> {
         _locked_solvables: &[SolvableId],
         _top_level_requirements: &[MatchSpec],
     ) -> Result<(), ClauseId> {
-        tracing::info!("=== Deciding assertions for requires without candidates");
+        info!("=== Deciding assertions for requires without candidates");
 
         for (i, clause) in self.clauses.iter().enumerate() {
             if let Clause::Requires(solvable_id, _) = clause.kind {
@@ -311,7 +347,7 @@ impl<'a> Solver<'a> {
                         .map_err(|_| clause_id)?;
 
                     if decided {
-                        tracing::info!(
+                        info!(
                             "Set {} = false",
                             self.pool.resolve_solvable_inner(solvable_id).display()
                         );
@@ -338,27 +374,36 @@ impl<'a> Solver<'a> {
             if i >= self.clauses.len() {
                 break;
             }
-
+            println!("I = {}", i);
             let (required_by, candidate) = {
                 let clause = &self.clauses[i];
                 i += 1;
 
                 // We are only interested in requires clauses
                 let Clause::Requires(solvable_id, deps) = clause.kind else {
+                    println!("Not a requires clause");
                     continue;
                 };
 
                 // Consider only clauses in which we have decided to install the solvable
                 if self.decision_tracker.assigned_value(solvable_id) != Some(true) {
+                    println!("Not true");
                     continue;
                 }
 
                 // Consider only clauses in which no candidates have been installed
                 let candidates = &self.pool.match_spec_to_sorted_candidates[deps];
+                println!("Candidates: {:?}", candidates);
                 if candidates
                     .iter()
-                    .any(|&c| self.decision_tracker.assigned_value(c) == Some(true))
+                    .map(|&c| {
+                        println!("Candidate: {:?}",self.pool.resolve_solvable(c).record);
+                        println!("Assigned value: {:?}", self.decision_tracker.assigned_value(c));
+                        c
+                    })
+                    .any(|c| self.decision_tracker.assigned_value(c) == Some(true))
                 {
+                    println!("Not which no candidates have been installed");
                     continue;
                 }
 
@@ -375,6 +420,7 @@ impl<'a> Solver<'a> {
                         .unwrap(),
                 )
             };
+            self.add_clauses_for_solvable(candidate);
 
             level = self.set_propagate_learn(level, candidate, required_by, ClauseId::new(i))?;
 
@@ -406,7 +452,7 @@ impl<'a> Solver<'a> {
     ) -> Result<u32, Problem> {
         level += 1;
 
-        tracing::info!(
+        info!(
             "=== Install {} at level {level} (required by {})",
             self.pool.resolve_solvable_inner(solvable).display(),
             self.pool.resolve_solvable_inner(required_by).display(),
@@ -420,24 +466,24 @@ impl<'a> Solver<'a> {
             let r = self.propagate(level);
             let Err((conflicting_solvable, attempted_value, conflicting_clause)) = r else {
                 // Propagation succeeded
-                tracing::info!("=== Propagation succeeded");
+                info!("=== Propagation succeeded");
                 break;
             };
 
             {
-                tracing::info!(
+                info!(
                     "=== Propagation conflicted: could not set {solvable} to {attempted_value}",
                     solvable = self
                         .pool
                         .resolve_solvable_inner(conflicting_solvable)
                         .display()
                 );
-                tracing::info!(
+                info!(
                     "During unit propagation for clause: {:?}",
                     self.clauses[conflicting_clause.index()].debug(&self.pool)
                 );
 
-                tracing::info!(
+                info!(
                     "Previously decided value: {}. Derived from: {:?}",
                     !attempted_value,
                     self.clauses[self
@@ -453,7 +499,7 @@ impl<'a> Solver<'a> {
             }
 
             if level == 1 {
-                tracing::info!("=== UNSOLVABLE");
+                info!("=== UNSOLVABLE");
                 for decision in self.decision_tracker.stack() {
                     let clause = &self.clauses[decision.derived_from.index()];
                     let level = self.decision_tracker.level(decision.solvable_id);
@@ -464,7 +510,7 @@ impl<'a> Solver<'a> {
                         continue;
                     }
 
-                    tracing::info!(
+                    info!(
                         "* ({level}) {action} {}. Reason: {:?}",
                         self.pool
                             .resolve_solvable_inner(decision.solvable_id)
@@ -480,7 +526,7 @@ impl<'a> Solver<'a> {
                 self.analyze(level, conflicting_solvable, conflicting_clause);
             level = new_level;
 
-            tracing::info!("=== Backtracked to level {level}");
+            info!("=== Backtracked to level {level}");
 
             // Optimization: propagate right now, since we know that the clause is a unit clause
             let decision = literal.satisfying_value();
@@ -490,7 +536,7 @@ impl<'a> Solver<'a> {
                     level,
                 )
                 .expect("bug: solvable was already decided!");
-            tracing::info!(
+            info!(
                 "=== Propagate after learn: {} = {decision}",
                 self.pool
                     .resolve_solvable_inner(literal.solvable_id)
@@ -513,8 +559,10 @@ impl<'a> Solver<'a> {
         // do not have watches)
         let learnt_clauses_start = self.learnt_clauses_start.index();
         for (i, clause) in self.clauses[learnt_clauses_start..].iter().enumerate() {
+            println!("Clause: {:?}", clause);
             let Clause::Learnt(learnt_index) = clause.kind else {
-                unreachable!();
+                // unreachable!();
+                continue;
             };
 
             let literals = &self.learnt_clauses[learnt_index];
@@ -537,7 +585,7 @@ impl<'a> Solver<'a> {
                 .map_err(|_| (literal.solvable_id, decision, clause_id))?;
 
             if decided {
-                tracing::info!(
+                info!(
                     "Propagate assertion {} = {}",
                     self.pool
                         .resolve_solvable_inner(literal.solvable_id)
@@ -636,7 +684,7 @@ impl<'a> Solver<'a> {
                                 // Skip logging for ForbidMultipleInstances, which is so noisy
                                 Clause::ForbidMultipleInstances(..) => {}
                                 _ => {
-                                    tracing::info!(
+                                    info!(
                                         "Propagate {} = {}. {:?}",
                                         self.pool
                                             .resolve_solvable_inner(remaining_watch.solvable_id)
@@ -699,7 +747,7 @@ impl<'a> Solver<'a> {
 
         let mut problem = Problem::default();
 
-        tracing::info!("=== ANALYZE UNSOLVABLE");
+        info!("=== ANALYZE UNSOLVABLE");
 
         let mut involved = HashSet::new();
         self.clauses[clause_id.index()].kind.visit_literals(
@@ -869,7 +917,7 @@ impl<'a> Solver<'a> {
         // Store it
         self.clauses.push(clause);
 
-        tracing::info!(
+        info!(
             "Learnt disjunction:\n{}",
             learnt
                 .into_iter()
@@ -900,6 +948,75 @@ impl<'a> Solver<'a> {
 
             self.watches.start_watching(clause, ClauseId::new(i));
         }
+    }
+
+    fn add_clauses_for_solvable(&mut self, candidate: SolvableId) {
+        println!("add_clauses_for_solvable({:?})", candidate);
+        let (deps, constrains) = match &self.pool.solvables[candidate].inner {
+            SolvableInner::Root(deps) => (deps, &[] as &[_]),
+            SolvableInner::Package(pkg) => (&pkg.dependencies, pkg.constrains.as_slice()),
+        };
+
+        let empty_vec = Vec::new();
+        println!("deps: {:?}", deps);
+        // println!("Resolved: {:?}", self.pool.resolve_match_spec(deps[0]));
+        let mut match_spec_to_sorted_candidates = self.pool.match_spec_to_sorted_candidates.clone();
+        let mut match_spec_to_forbidden = self.pool.match_spec_to_forbidden.clone();
+        let favored_map = HashMap::new();
+
+        // Enqueue the candidates of the dependencies
+        for &dep in deps {
+            if self.seen_requires.insert(dep) {
+                self.pool.populate_candidates(
+                    dep,
+                    &favored_map,
+                    &mut match_spec_to_sorted_candidates,
+                    &self.match_spec_to_candidates,
+                    &self.match_spec_to_highest_version,
+                    &mut self.sorting_cache,
+                );
+            }
+
+            for &candidate in match_spec_to_sorted_candidates
+                .get(dep)
+                .unwrap_or(&empty_vec)
+            {
+                // Note: we skip candidates we have already seen
+                if self.visited.insert(candidate) {
+                    self.stack.push(candidate);
+                }
+            }
+        }
+
+        // Requires
+        for &dep in deps {
+            self.clauses.push(ClauseState::new(
+                Clause::Requires(candidate, dep),
+                &self.learnt_clauses,
+                &match_spec_to_sorted_candidates,
+            ));
+        }
+
+        // Constrains
+        for &dep in constrains {
+            if self.seen_forbidden.insert(dep) {
+                self.pool
+                    .populate_forbidden(dep, &mut match_spec_to_forbidden);
+            }
+
+            for &dep in match_spec_to_forbidden.get(dep).unwrap_or(&empty_vec) {
+                self.clauses.push(ClauseState::new(
+                    Clause::Constrains(candidate, dep),
+                    &self.learnt_clauses,
+                    &match_spec_to_sorted_candidates,
+                ));
+            }
+        }
+
+        self.pool.match_spec_to_sorted_candidates = match_spec_to_sorted_candidates;
+        self.pool.match_spec_to_forbidden = match_spec_to_forbidden;
+        // retrieve dependencies of the solvable and add them to the pool if they aren't in yet
+        // self.pool.add_package(s.repo_id(), );
     }
 }
 

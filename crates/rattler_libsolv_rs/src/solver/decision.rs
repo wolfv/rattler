@@ -1,7 +1,7 @@
 use crate::id::{ClauseId, SolvableId};
 
 /// Represents an assignment to a variable
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) struct Decision {
     pub(crate) solvable_id: SolvableId,
     pub(crate) value: bool,

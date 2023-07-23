@@ -170,7 +170,7 @@ impl Clause {
 /// when the value assigned to the variable has changed (this technique is known as _watches_).
 /// Clauses that are tracking the same variable are grouped together in a linked list, so it becomes
 /// easy to notify them all.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ClauseState {
     // The ids of the solvables this clause is watching
     pub watched_literals: [SolvableId; 2],
