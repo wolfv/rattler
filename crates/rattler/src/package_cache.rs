@@ -214,7 +214,7 @@ impl PackageCache {
 
                 // Extract any potential error
                 let Err(err) = result else { return Ok(()); };
-
+                println!("Error: {:?}", err);
                 // Only retry on certain errors.
                 if !matches!(
                     &err,
@@ -311,14 +311,18 @@ mod test {
         routing::get_service,
         Router,
     };
+    use bytes::Bytes;
     use rattler_conda_types::package::{ArchiveIdentifier, PackageFile, PathsJson};
     use rattler_networking::retry_policies::{DoNotRetryPolicy, ExponentialBackoffBuilder};
-    use std::{fs::File, future::IntoFuture, net::SocketAddr, path::Path, sync::Arc};
+    use tokio_stream::StreamExt;
+    use std::{convert::Infallible, fs::File, future::IntoFuture,net::SocketAddr, path::Path, sync::Arc};
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
+    use tokio::{sync::Mutex};
+    use futures::stream;
     use tower_http::services::ServeDir;
     use url::Url;
 
+    
     #[tokio::test]
     pub async fn test_package_cache() {
         let tar_archive_path =
@@ -382,6 +386,46 @@ mod test {
         Ok(next.run(req).await)
     }
 
+    /// A helper middleware function that fails the first two requests.
+    async fn fail_with_half_package(
+        State(count): State<Arc<Mutex<i32>>>,
+        req: Request<Body>,
+        next: Next,
+    ) -> Result<Response, StatusCode> {
+        let count = {
+            let mut count = count.lock().await;
+            *count += 1;
+            *count
+        };
+
+        println!("Running middleware for request #{count} for {}", req.uri());
+        let response = next.run(req).await;
+
+        if count <= 2 {
+            // println!("Cutting response body in half");
+            let body = response.into_body();
+            let mut body = body.into_data_stream();
+            let mut buffer = Vec::new();
+            while let Some(Ok(chunk)) = body.next().await {
+                buffer.extend(chunk);
+            }
+
+            let half = buffer.len() / 2;
+            // let body = Body::from(buffer.into_iter().take(half).collect::<Vec<u8>>());
+            // return Ok(Response::new(body));
+            let bytes = buffer.into_iter().take(half).collect::<Vec<u8>>();
+            // Create a stream that ends prematurely
+            let stream = stream::iter(vec![
+                Ok::<_, Infallible>(Bytes::from_iter(bytes.into_iter())),
+                // The stream ends after sending partial data, simulating a premature close
+            ]);
+            let body = Body::from_stream(stream);
+            return Ok(Response::new(body));
+        }
+
+        Ok(response)
+    }
+
     #[tokio::test]
     pub async fn test_flaky_package_cache() {
         let static_dir = get_test_data_dir();
@@ -396,8 +440,12 @@ mod test {
                 .route_service("/*key", service)
                 .layer(middleware::from_fn_with_state(
                     request_count.clone(),
-                    fail_the_first_two_requests,
+                    fail_with_half_package,
                 ));
+                // .layer(middleware::from_fn_with_state(
+                //     request_count.clone(),
+                //     fail_the_first_two_requests,
+                // ));
 
         // Construct the server that will listen on localhost but with a *random port*. The random
         // port is very important because it enables creating multiple instances at the same time.
@@ -412,7 +460,8 @@ mod test {
         let packages_dir = tempdir().unwrap();
         let cache = PackageCache::new(packages_dir.path());
 
-        let archive_name = "ros-noetic-rosbridge-suite-0.11.14-py39h6fdeb60_14.tar.bz2";
+        // let archive_name = "ros-noetic-rosbridge-suite-0.11.14-py39h6fdeb60_14.tar.bz2";
+        let archive_name = "conda-22.11.1-py38haa244fe_1.conda";
         let server_url = Url::parse(&format!("http://localhost:{}", addr.port())).unwrap();
 
         // Do the first request without
@@ -441,7 +490,7 @@ mod test {
                 ExponentialBackoffBuilder::default().build_with_max_retries(3),
             )
             .await;
-
+        println!("Result: {:?}", result);
         assert!(result.is_ok());
         {
             let request_count_lock = request_count.lock().await;
