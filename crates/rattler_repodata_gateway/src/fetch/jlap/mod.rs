@@ -80,6 +80,7 @@
 
 use blake2::digest::Output;
 use blake2::digest::{FixedOutput, Update};
+use json_patch::PatchOperation;
 use rattler_digest::{
     parse_digest_from_hex, serde::SerializableHash, Blake2b256, Blake2b256Hash, Blake2bMac256,
 };
@@ -191,6 +192,13 @@ pub struct Patch {
 
     /// Patches to apply to current `repodata.json` file
     pub patch: json_patch::Patch, // [] is a valid, empty patch
+}
+
+/// Represents a single package in an overlay file
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct OverlayFile {
+    packages: BTreeMap<String, Vec<PatchOperation>>,
+    conda_packages: BTreeMap<String, Vec<PatchOperation>>,
 }
 
 impl FromStr for Patch {
@@ -327,6 +335,76 @@ impl<'a> JLAPResponse<'a> {
         }
     }
 
+    /// Updates an overlay file with the patches from the JLAP response
+    pub fn update_overlay(
+        &self,
+        overlay_path: &Path,
+        hash: Output<Blake2b256>,
+    ) -> Result<Blake2b256Hash, JLAPError> {
+        // We use the current hash to find which patches we need to apply
+        println!("Finding patches for hash: {:x}", hash);
+        let current_idx = self.patches.iter().position(|patch| patch.from == hash);
+        let Some(idx) = current_idx else {
+            return Err(JLAPError::NoHashFound);
+        };
+
+        // Open overlay file
+        let reader = std::fs::File::open(overlay_path).map_err(JLAPError::FileSystem)?;
+        // load overlay file as json
+        // we might want to do some additional book-keeping for added and removed packages
+        let mut overlay: OverlayFile =
+            serde_json::from_reader(reader).map_err(JLAPError::JSONParse)?;
+
+        let insert = |overlay: &mut OverlayFile, path: String, op: PatchOperation| {
+            // split first three / to get package or package.conda and package name
+            let mut parts = path.splitn(4, '/');
+            parts.next();
+            let package = parts.next().unwrap();
+            let subpackage = parts.next().unwrap();
+            if package == "packages" {
+                overlay
+                    .packages
+                    .entry(subpackage.to_string())
+                    .or_insert(vec![])
+                    .push(op);
+            } else if package == "packages.conda" {
+                overlay
+                    .conda_packages
+                    .entry(subpackage.to_string())
+                    .or_insert(vec![])
+                    .push(op);
+            } else {
+                // we don't support other packages
+            }
+        };
+
+        for patch in &self.patches[idx..] {
+            let p = &patch.patch;
+            for op in &p.0 {
+                match op {
+                    PatchOperation::Add(inner) => {
+                        insert(&mut overlay, inner.path.clone(), op.clone())
+                    }
+                    PatchOperation::Remove(inner) => {
+                        insert(&mut overlay, inner.path.clone(), op.clone())
+                    }
+                    PatchOperation::Replace(inner) => {
+                        insert(&mut overlay, inner.path.clone(), op.clone())
+                    }
+                    _ => {
+                        tracing::warn!("Unsupported operation in JLAP: {:?}", op);
+                    }
+                }
+            }
+        }
+
+        // write overlay file back to disk
+        let overlay_file = std::fs::File::create(overlay_path).map_err(JLAPError::FileSystem)?;
+        serde_json::to_writer_pretty(overlay_file, &overlay).map_err(JLAPError::JSONParse)?;
+
+        Ok(Blake2b256Hash::default())
+    }
+
     /// Returns a new [`JLAPState`] based on values in [`JLAPResponse`] struct
     ///
     /// We accept `position` as an argument because it is not derived from the JLAP response.
@@ -443,6 +521,11 @@ pub async fn patch_repo_data(
             repo_data_state.blake2_hash.unwrap_or_default(),
         ));
     }
+
+    let overlay_path = Path::new("./overlay.json");
+    let overlay_file = OverlayFile::default();
+    serde_json::to_writer(std::fs::File::create(overlay_path).unwrap(), &overlay_file).unwrap();
+    let overlay = jlap.update_overlay(overlay_path, hash);
 
     // Applies patches and returns early if an error is encountered
     let hash = jlap.apply(repo_data_json_path, hash).await?;
@@ -610,11 +693,17 @@ fn get_jlap_state(state: Option<JLAPState>) -> JLAPState {
             initialization_vector: state.initialization_vector,
             footer: state.footer,
         },
-        None => JLAPState {
-            position: JLAP_START_POSITION,
+        None => JLAPState::default(),
+    }
+}
+
+impl Default for JLAPState {
+    fn default() -> Self {
+        Self {
             initialization_vector: JLAP_START_INITIALIZATION_VECTOR.to_vec(),
+            position: JLAP_START_POSITION,
             footer: JLAPFooter::default(),
-        },
+        }
     }
 }
 
@@ -627,8 +716,11 @@ fn blake2b_256_hash_with_key(data: &[u8], key: &[u8]) -> Output<Blake2bMac256> {
 
 #[cfg(test)]
 mod test {
-    use super::patch_repo_data;
-    use std::path::PathBuf;
+    use super::{patch_repo_data, JLAPResponse, JLAPState, OverlayFile};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use crate::fetch::cache::RepoDataState;
     use crate::utils::simple_channel_server::SimpleChannelServer;
@@ -973,5 +1065,21 @@ mod test {
             updated_jlap_state.footer.latest,
             parse_digest_from_hex::<Blake2b256>(expected_hash).unwrap()
         );
+    }
+
+    #[test]
+    fn test_apply_overlay() {
+        let jlap_file =
+            Path::new("/Users/wolfv/Programs/rattler/crates/rattler_repodata_gateway/out.jlap");
+        let contents = fs::read_to_string(jlap_file).unwrap();
+        let jlap = JLAPResponse::new(&contents, &JLAPState::default()).unwrap();
+
+        let overlay_path = Path::new("./overlay.json");
+        let overlay_file = OverlayFile::default();
+        serde_json::to_writer(std::fs::File::create(overlay_path).unwrap(), &overlay_file).unwrap();
+
+        let hash = jlap.patches[0].from.clone();
+
+        let overlay = jlap.update_overlay(overlay_path, hash);
     }
 }
