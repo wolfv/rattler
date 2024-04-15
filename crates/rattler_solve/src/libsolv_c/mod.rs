@@ -113,7 +113,7 @@ impl super::SolverImpl for Solver {
         pool.set_debug_level(Verbosity::Low);
 
         // Add virtual packages
-        let repo = Repo::new(&pool, "virtual_packages");
+        let repo = Repo::new(&pool, "virtual_packages", 0);
         add_virtual_packages(&pool, &repo, &task.virtual_packages);
 
         // Mark the virtual packages as installed.
@@ -130,7 +130,15 @@ impl super::SolverImpl for Solver {
             let channel_name = &repodata.records[0].channel;
 
             // We dont want to drop the Repo, its stored in the pool anyway.
-            let repo = ManuallyDrop::new(Repo::new(&pool, channel_name));
+            let priority: i32 = if task.channel_priority == ChannelPriority::Strict {
+                // TODO we need to fill in the correct values here, derived from some channel -> priority map
+                // Higher values take precedence.
+                1
+            } else {
+                0
+            };
+
+            let repo = ManuallyDrop::new(Repo::new(&pool, channel_name, 0));
 
             if let Some(solv_file) = repodata.solv_file {
                 add_solv_file(&pool, &repo, solv_file);

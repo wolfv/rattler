@@ -28,12 +28,13 @@ impl<'pool> Drop for Repo<'pool> {
 
 impl<'pool> Repo<'pool> {
     /// Constructs a repo in the provided pool, associated to the given url
-    pub fn new(pool: &Pool, url: impl AsRef<str>) -> Repo<'_> {
+    pub fn new(pool: &Pool, url: impl AsRef<str>, priority: i32) -> Repo<'_> {
         let c_url = c_string(url);
 
         unsafe {
             let repo_ptr = ffi::repo_create(pool.raw_ptr(), c_url.as_ptr());
-            let non_null_ptr = NonNull::new(repo_ptr).expect("repo ptr was null");
+            let mut non_null_ptr = NonNull::new(repo_ptr).expect("repo ptr was null");
+            non_null_ptr.as_mut().priority = priority;
             Repo(non_null_ptr, PhantomData)
         }
     }
