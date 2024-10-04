@@ -575,6 +575,7 @@ fn convert_shebang_to_env(shebang: Cow<'_, str>) -> Cow<'_, str> {
 }
 
 /// Long shebangs and shebangs with spaces are invalid.
+/// Function has to be called with a shebang that starts with `#!`.
 /// Long shebangs are longer than 127 on Linux or 512 on macOS characters.
 /// Shebangs with spaces are replaced with a shebang that uses `/usr/bin/env` to find the executable.
 /// This function replaces long shebangs with a shebang that uses `/usr/bin/env` to find the
@@ -584,12 +585,10 @@ fn replace_shebang<'a>(
     old_new: (&str, &str),
     platform: &Platform,
 ) -> Cow<'a, str> {
-    // If the new shebang would contain a space, return a `#!/usr/bin/env` shebang
-    assert!(
-        shebang.starts_with("#!"),
-        "Shebang does not start with #! ({shebang})",
-    );
+    // This should not happen as we never call this function when this is not true
+    debug_assert!(shebang.starts_with("#!"), "Shebang does not start with #!");
 
+    // If the new shebang would contain a space, return a `#!/usr/bin/env` shebang
     if old_new.1.contains(' ') {
         // Doesn't matter if we don't replace anything
         if !shebang.contains(old_new.0) {
@@ -602,11 +601,6 @@ fn replace_shebang<'a>(
     }
 
     let shebang: Cow<'_, str> = shebang.replace(old_new.0, old_new.1).into();
-
-    if !shebang.starts_with("#!") {
-        tracing::warn!("Shebang does not start with #! ({})", shebang);
-        return shebang;
-    }
 
     if is_valid_shebang_length(&shebang, platform) {
         shebang
@@ -645,7 +639,6 @@ pub fn copy_and_replace_textual_placeholder(
             (prefix_placeholder, target_prefix),
             target_platform,
         );
-        // let replaced = first_line.replace(prefix_placeholder, target_prefix);
         destination.write_all(new_shebang.as_bytes())?;
         source_bytes = rest;
     }

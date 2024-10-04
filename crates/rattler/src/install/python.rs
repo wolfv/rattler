@@ -22,6 +22,13 @@ pub struct PythonInfo {
     pub bin_dir: PathBuf,
 }
 
+pub(crate) fn long_python_shebang(exe: Cow<&str, '_>, exe_args: Option<Cow<&str, '_>>) -> String{
+    format!(
+        "#!/bin/sh\n'''exec' \"{}\"{} \"$0\" \"$@\" #'''",
+        exe, exe_args
+    )
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PythonInfoError {
     #[error("invalid python version '{0}'")]
