@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use fs_err::{self as fs};
-use futures::future::try_join_all;
+use futures::{future::try_join_all, TryStreamExt};
 use fxhash::FxHashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rattler_conda_types::{
@@ -15,7 +15,7 @@ use rattler_networking::{Authentication, AuthenticationStorage};
 use rattler_package_streaming::{read, seek};
 use std::{
     collections::{HashMap, HashSet},
-    io::{Cursor, Read},
+    io::{Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -29,16 +29,17 @@ use opendal::{
 };
 
 /// Extract the package record from an `index.json` file.
-pub fn package_record_from_index_json<T: Read>(
-    package_as_bytes: impl AsRef<[u8]>,
-    index_json_reader: &mut T,
+pub fn package_record_from_index_json(
+    mut reader: impl Read,
+    index: IndexJson,
 ) -> std::io::Result<PackageRecord> {
-    let index = IndexJson::from_reader(index_json_reader)?;
 
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes);
     let sha256_result =
-        rattler_digest::compute_bytes_digest::<rattler_digest::Sha256>(&package_as_bytes);
-    let md5_result = rattler_digest::compute_bytes_digest::<rattler_digest::Md5>(&package_as_bytes);
-    let size = package_as_bytes.as_ref().len();
+        rattler_digest::compute_bytes_digest::<rattler_digest::Sha256>(&bytes);
+    let md5_result = rattler_digest::compute_bytes_digest::<rattler_digest::Md5>(&bytes);
+    let size = bytes.len();
 
     let package_record = PackageRecord {
         name: index.name,
@@ -81,17 +82,18 @@ pub fn package_record_from_tar_bz2(file: &Path) -> std::io::Result<PackageRecord
 /// Extract the package record from a `.tar.bz2` package file.
 /// This function will look for the `info/index.json` file in the conda package
 /// and extract the package record from it.
-pub fn package_record_from_tar_bz2_reader(reader: impl Read) -> std::io::Result<PackageRecord> {
-    let bytes = reader.bytes().collect::<Result<Vec<u8>, _>>()?;
-    let reader = Cursor::new(bytes.clone());
-    let mut archive = read::stream_tar_bz2(reader);
+pub fn package_record_from_tar_bz2_reader(mut reader: impl Read + Seek) -> std::io::Result<PackageRecord> {
+    let mut archive = read::stream_tar_bz2(&reader);
     for entry in archive.entries()?.flatten() {
         let mut entry = entry;
         let path = entry.path()?;
         if path.as_os_str().eq("info/index.json") {
-            return package_record_from_index_json(bytes, &mut entry);
+            let index_json = IndexJson::from_reader(entry)?;
+            reader.seek(std::io::SeekFrom::Start(0))?;
+            return package_record_from_index_json(&mut entry, index_json);
         }
     }
+
     Err(std::io::Error::new(
         std::io::ErrorKind::Other,
         "No index.json found",
@@ -109,9 +111,9 @@ pub fn package_record_from_conda(file: &Path) -> std::io::Result<PackageRecord> 
 /// Extract the package record from a `.conda` package file content.
 /// This function will look for the `info/index.json` file in the conda package
 /// and extract the package record from it.
-pub fn package_record_from_conda_reader(reader: impl Read) -> std::io::Result<PackageRecord> {
+pub fn package_record_from_conda_reader(reader: impl Read + Seek) -> std::io::Result<PackageRecord> {
     let bytes = reader.bytes().collect::<Result<Vec<u8>, _>>()?;
-    let reader = Cursor::new(bytes.clone());
+
     let mut archive = seek::stream_conda_info(reader).expect("Could not open conda file");
 
     for entry in archive.entries()?.flatten() {
@@ -243,14 +245,29 @@ async fn index_subdir(
                             console::style(filename.clone()).dim()
                         ));
                         let file_path = format!("{subdir}/{filename}");
-                        let buffer = op.read(&file_path).await?;
-                        let bytes = buffer.to_vec();
-                        let cursor = Cursor::new(bytes);
+                        let reader = op.reader(&file_path).await.map_err(|e| {
+                            tracing::error!("Could not open file {}: {}", file_path, e);
+                            e
+                        })?
+                        .into_bytes_stream(..u64::MAX)
+                        .await?;
+
+                        let mut temp_file = tempfile::spooled_tempfile(10 * 1024 * 1024);
+
+                        // Process the stream directly
+                        futures::pin_mut!(reader);
+                        while let Some(chunk_result) = reader.try_next().await? {
+                            temp_file.write_all(&chunk_result)?; // Write the chunk to the file
+                        }
+
+                        // If you need to flush explicitly
+                        temp_file.flush()?;
+
                         // We already know it's not None
-                        let archive_type = ArchiveType::try_from(&filename).unwrap();
+                        let archive_type = ArchiveType::try_from(&filename).expect("We tested this beforehand");
                         let record = match archive_type {
-                            ArchiveType::TarBz2 => package_record_from_tar_bz2_reader(cursor),
-                            ArchiveType::Conda => package_record_from_conda_reader(cursor),
+                            ArchiveType::TarBz2 => package_record_from_tar_bz2_reader(temp_file),
+                            ArchiveType::Conda => package_record_from_conda_reader(temp_file),
                         }?;
                         pb.inc(1);
                         Ok::<(String, PackageRecord), std::io::Error>((filename.clone(), record))
