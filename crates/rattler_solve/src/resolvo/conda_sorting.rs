@@ -10,7 +10,7 @@ use resolvo::{
     utils::Pool, Dependencies, NameId, Requirement, SolvableId, SolverCache, VersionSetId,
 };
 
-use super::{NameType, SolverMatchSpec, SolverPackageRecord};
+use super::{SolverMatchSpec, SolverPackageRecord};
 use crate::resolvo::CondaDependencyProvider;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -52,7 +52,7 @@ impl<'a, 'repo> SolvableSorter<'a, 'repo> {
     }
 
     /// Reference to the pool
-    fn pool(&self) -> &Pool<SolverMatchSpec<'repo>, NameType> {
+    fn pool(&self) -> &Pool<SolverMatchSpec<'repo>, String> {
         &self.solver.provider().pool
     }
 
@@ -199,6 +199,9 @@ impl<'a, 'repo> SolvableSorter<'a, 'repo> {
                         unreachable!("Union requirements, are not implemented in the ordering")
                     }
                     Requirement::Single(version_set_id) => version_set_id,
+                    Requirement::Extra {
+                        version_constraint, ..
+                    } => version_constraint,
                 };
 
                 // Get the name of the dependency and add the version set id to the list of

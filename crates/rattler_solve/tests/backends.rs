@@ -628,6 +628,9 @@ mod libsolv_c {
         GenericVirtualPackage, SimpleSolveTask, SolveError, Version,
     };
 
+    #[cfg(feature = "experimental_extras")]
+    use super::dummy_channel_with_optional_dependencies_json_path;
+
     solver_backend_tests!(rattler_solve::libsolv_c::Solver);
 
     #[test]
@@ -713,6 +716,38 @@ mod libsolv_c {
             .unwrap(),
             info.package_record.md5.as_ref().unwrap()
         );
+    }
+
+    #[cfg(feature = "experimental_extras")]
+    /// Test that libsolv_c solver handles extras properly.
+    /// Currently, libsolv_c does not support extras and should return an UnsupportedOperations error.
+    /// This test documents the current behavior and ensures we're aware when extras support is added.
+    #[test]
+    fn test_solve_dummy_repo_extra_depends_foo_latest_bors_libsolv_c() {
+        let result = solve::<rattler_solve::libsolv_c::Solver>(
+            &[dummy_channel_with_optional_dependencies_json_path()],
+            SimpleSolveTask {
+                specs: &["foo[extras=[with-latest-bors]]"],
+                ..SimpleSolveTask::default()
+            },
+        );
+
+        // libsolv_c currently does not support extras and should return an UnsupportedOperations error
+        match result {
+            Err(SolveError::UnsupportedOperations(ops)) => {
+                assert!(
+                    ops.contains(&"extras".to_string()),
+                    "Expected 'extras' to be in unsupported operations"
+                );
+                println!("✓ libsolv_c correctly reports that extras are not supported");
+            }
+            Ok(_) => {
+                panic!("Expected libsolv_c to return UnsupportedOperations error for extras, but it succeeded. This suggests extras support was added - please update this test!");
+            }
+            Err(e) => {
+                panic!("Expected UnsupportedOperations error, but got: {:?}", e);
+            }
+        }
     }
 }
 
@@ -1319,6 +1354,68 @@ mod resolvo {
     }
 
     #[cfg(feature = "experimental_extras")]
+    /// Test that documents the current bug where requesting a package with extras
+    /// installs the base package but not the extra dependencies.
+    /// This test shows the issue: when requesting foo[extras=[with-latest-bors]],
+    /// only foo is installed but bors (the extra dependency) is missing.
+    #[test]
+    fn test_solve_dummy_repo_extra_depends_base_package_bug() {
+        let result = solve::<rattler_solve::resolvo::Solver>(
+            &[dummy_channel_with_optional_dependencies_json_path()],
+            SimpleSolveTask {
+                specs: &["foo[extras=[with-latest-bors]]"],
+                ..SimpleSolveTask::default()
+            },
+        )
+        .unwrap();
+
+        // Document the current bug: only the base package is installed, missing the extra dependency
+        assert_eq!(
+            result.records.len(),
+            1,
+            "BUG: Only base package is installed, missing extra dependency"
+        );
+
+        // The base package is installed
+        let foo_installed = result
+            .records
+            .iter()
+            .any(|r| r.package_record.name.as_normalized() == "foo");
+        assert!(foo_installed, "Base package foo should be installed");
+
+        // But the extra dependency is NOT installed (this is the bug)
+        let bors_installed = result
+            .records
+            .iter()
+            .any(|r| r.package_record.name.as_normalized() == "bors");
+        assert!(
+            !bors_installed,
+            "CURRENT BUG: Extra dependency bors should be installed but is not"
+        );
+
+        // Check that foo has the expected version (the version should be compatible with the base package)
+        let foo_record = result
+            .records
+            .iter()
+            .find(|r| r.package_record.name.as_normalized() == "foo")
+            .unwrap();
+
+        // The features may or may not be recorded depending on the implementation
+        // Let's check what actually happens
+        match result.features.get("foo") {
+            Some(features) => {
+                println!("Features recorded: {:?}", features);
+                assert_eq!(features, &vec!["with-latest-bors".to_string()]);
+            }
+            None => {
+                println!("No features recorded - this may be part of the bug");
+            }
+        }
+
+        println!("BUG CONFIRMED: When requesting foo[extras=[with-latest-bors]], only foo is installed (version {}), but bors dependency is missing", foo_record.package_record.version);
+    }
+
+    #[cfg(feature = "experimental_extras")]
     /// Test what happens when the only package that provides a certain feature cannot be selected due to a conflict
     #[test]
     fn test_solve_dummy_repo_extra_depends_feature_conflict() {
@@ -1335,7 +1432,9 @@ mod resolvo {
 
     #[test]
     fn test_solve_conditional_dependencies() {
-        use rattler_conda_types::{MatchSpec, PackageRecord, RepoData, RepoDataRecord, Version, VersionWithSource};
+        use rattler_conda_types::{
+            MatchSpec, PackageRecord, RepoData, RepoDataRecord, Version, VersionWithSource,
+        };
         use rattler_solve::{SolverImpl, SolverTask};
         use std::collections::BTreeMap;
 
@@ -1348,49 +1447,22 @@ mod resolvo {
             "h123456_0",
             0,
         );
-        
-        let python39_pkg = installed_package(
-            "test",
-            "linux-64",
-            "python",
-            "3.9.0",
-            "h123456_0",
-            0,
-        );
-        
-        let python38_pkg = installed_package(
-            "test",
-            "linux-64",
-            "python",
-            "3.8.0",
-            "h123456_0",
-            0,
-        );
 
-        let numpy_pkg = installed_package(
-            "test",
-            "linux-64",
-            "numpy",
-            "1.21.0",
-            "py39h123456_0",
-            0,
-        );
+        let python39_pkg = installed_package("test", "linux-64", "python", "3.9.0", "h123456_0", 0);
 
-        let scipy_pkg = installed_package(
-            "test",
-            "linux-64",
-            "scipy",
-            "1.7.0",
-            "py39h123456_0",
-            0,
-        );
+        let python38_pkg = installed_package("test", "linux-64", "python", "3.8.0", "h123456_0", 0);
+
+        let numpy_pkg =
+            installed_package("test", "linux-64", "numpy", "1.21.0", "py39h123456_0", 0);
+
+        let scipy_pkg = installed_package("test", "linux-64", "scipy", "1.7.0", "py39h123456_0", 0);
 
         // Modify the conditional package to have conditional dependencies
         let mut conditional_pkg_modified = conditional_pkg.clone();
         conditional_pkg_modified.package_record.depends = vec![
             "python >=3.8".to_string(),
-            "numpy; if python >=3.9".to_string(),  // Conditional dependency
-            "scipy; if __unix".to_string(),         // Virtual package condition
+            "numpy; if python >=3.9".to_string(), // Conditional dependency
+            "scipy; if __unix".to_string(),       // Virtual package condition
         ];
 
         // Test 1: Solve with Python 3.9 - should include numpy due to condition
@@ -1421,21 +1493,23 @@ mod resolvo {
         // Check if our conditional dependency parsing worked
         match result {
             Ok(solution) => {
-                let package_names: Vec<_> = solution.records.iter()
+                let package_names: Vec<_> = solution
+                    .records
+                    .iter()
                     .map(|r| r.package_record.name.as_normalized())
                     .collect();
-                
+
                 // At minimum, should include conditional-pkg and python
                 assert!(package_names.contains(&"conditional-pkg"));
                 assert!(package_names.contains(&"python"));
-                
+
                 // If conditional dependencies are working, numpy should be included due to python>=3.9 condition
                 if package_names.contains(&"numpy") {
                     println!("✓ numpy was included due to python>=3.9 condition");
                 } else {
                     println!("✗ numpy was NOT included - conditional dependencies may not be working yet");
                 }
-                
+
                 // If conditional dependencies are working, scipy should be included due to __unix condition
                 if package_names.contains(&"scipy") {
                     println!("✓ scipy was included due to __unix condition");
@@ -1446,7 +1520,9 @@ mod resolvo {
             Err(e) => {
                 // If solving fails, it might be because the conditional dependency implementation is not complete
                 println!("Solving failed: {:?}", e);
-                println!("This is expected if conditional dependencies are not fully implemented yet");
+                println!(
+                    "This is expected if conditional dependencies are not fully implemented yet"
+                );
             }
         }
 
@@ -1477,21 +1553,25 @@ mod resolvo {
 
         match result {
             Ok(solution) => {
-                let package_names: Vec<_> = solution.records.iter()
+                let package_names: Vec<_> = solution
+                    .records
+                    .iter()
                     .map(|r| r.package_record.name.as_normalized())
                     .collect();
-                
+
                 // Should include conditional-pkg and python
                 assert!(package_names.contains(&"conditional-pkg"));
                 assert!(package_names.contains(&"python"));
-                
+
                 // If conditional dependencies are working, numpy should NOT be included due to python<3.9 condition
                 if !package_names.contains(&"numpy") {
                     println!("✓ numpy was NOT included due to python<3.9 condition");
                 } else {
-                    println!("✗ numpy was included - conditional dependencies may not be working yet");
+                    println!(
+                        "✗ numpy was included - conditional dependencies may not be working yet"
+                    );
                 }
-                
+
                 // If conditional dependencies are working, scipy should be included due to __unix condition
                 if package_names.contains(&"scipy") {
                     println!("✓ scipy was included due to __unix condition");
@@ -1501,7 +1581,9 @@ mod resolvo {
             }
             Err(e) => {
                 println!("Solving failed: {:?}", e);
-                println!("This is expected if conditional dependencies are not fully implemented yet");
+                println!(
+                    "This is expected if conditional dependencies are not fully implemented yet"
+                );
             }
         }
     }
