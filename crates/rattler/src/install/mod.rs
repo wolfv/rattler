@@ -268,6 +268,7 @@ pub async fn link_package(
     driver: &InstallDriver,
     options: InstallOptions,
 ) -> Result<Vec<prefix_record::PathsEntry>, InstallError> {
+    println!("[link_package] linking package: {}", package_dir.display());
     // Determine the target prefix for linking
     let target_prefix = options
         .target_prefix
@@ -316,6 +317,7 @@ pub async fn link_package(
             Ok(reflink_copy::ReflinkSupport::Unknown) => allow_hard_links,
         }
     });
+    println!("Reflink support: {}", allow_ref_links);
 
     // Determine the platform to use
     let platform = options.platform.unwrap_or(Platform::current());
@@ -585,6 +587,7 @@ pub fn link_package_sync(
     clobber_registry: Arc<Mutex<ClobberRegistry>>,
     options: InstallOptions,
 ) -> Result<Vec<prefix_record::PathsEntry>, InstallError> {
+    println!("[link_package_sync] linking package: {}", package_dir.display());
     // Determine the target prefix for linking
     let target_prefix = options
         .target_prefix
@@ -718,6 +721,7 @@ pub fn link_package_sync(
 
     let mut created_directories = HashSet::new();
     let mut reflinked_files = HashMap::new();
+    println!("Directories to construct: {directories_to_construct:?}");
     for directory in directories_to_construct
         .into_iter()
         .sorted_by(|a, b| a.components().count().cmp(&b.components().count()))
@@ -737,9 +741,12 @@ pub fn link_package_sync(
             continue;
         }
 
+        println!("Allow ref links: {}", allow_ref_links);
+        println!("Is noarch python: {}", index_json.noarch.is_python());
         if allow_ref_links && cfg!(target_os = "macos") && !index_json.noarch.is_python() {
             // reflink the whole directory if possible
             // currently this does not handle noarch packages
+            println!("reflinking directory: {}", directory.display());
             match reflink_copy::reflink(package_dir.join(&directory), &full_path) {
                 Ok(_) => {
                     created_directories.insert(directory.clone());
