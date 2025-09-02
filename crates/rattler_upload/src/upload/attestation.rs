@@ -177,6 +177,8 @@ async fn sign_with_cosign(
     if config.use_github_oidc {
         // Use GitHub OIDC for identity
         cmd.env("COSIGN_EXPERIMENTAL", "1");
+        // Skip interactive prompts for automated environments
+        cmd.env("COSIGN_YES", "true");
 
         // Set GitHub-specific environment if available
         if let Ok(server_url) = std::env::var("GITHUB_SERVER_URL") {

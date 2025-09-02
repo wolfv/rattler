@@ -120,7 +120,7 @@ jobs:
 
       - name: Run rattler upload with attestation generation
         run: |
-          export PKG_NAME=rich-13.9.4-pyhd8ed1ab_0.conda
+          export PKG_NAME=rich-13.9.2-pyhd8ed1ab_0.conda
           curl -L -o $PKG_NAME https://repo.prefix.dev/conda-forge/noarch/$PKG_NAME
           cargo run --bin rattler -- upload prefix --generate-attestation -c wolf-private-test $PKG_NAME
 

@@ -185,8 +185,18 @@ pub async fn upload_package_to_prefix(
                     Some(attestation_file)
                 }
                 Err(e) => {
-                    warn!("Failed to generate attestation for {}: {}", filename, e);
-                    None
+                    // If attestation generation was explicitly requested, fail the upload
+                    return Err(miette::miette!(
+                        "Failed to generate attestation for {}: {}\n\
+                         Upload aborted because attestation generation was requested but failed.\n\
+                         \n\
+                         Troubleshooting:\n\
+                         1. Ensure cosign is installed: pixi global install cosign\n\
+                         2. Check that you're running in GitHub Actions with 'id-token: write' permission\n\
+                         3. Verify OIDC token is available and valid\n\
+                         4. Check cosign logs above for specific errors",
+                        filename, e
+                    ));
                 }
             }
         } else {
