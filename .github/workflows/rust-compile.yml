@@ -1,6 +1,6 @@
 on:
   push:
-    branches: [main]
+    branches: [main, attestation-generation]
   pull_request:
     paths:
       # When we change pyproject.toml, we want to ensure that the maturin builds still work
