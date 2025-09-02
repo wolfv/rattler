@@ -40,9 +40,9 @@ pub struct AttestationResponse {
 /// Configuration for attestation creation
 #[derive(Debug, Clone)]
 pub struct AttestationConfig {
-    pub repo_owner: String,
-    pub repo_name: String,
-    pub github_token: String,
+    pub repo_owner: Option<String>,
+    pub repo_name: Option<String>,
+    pub github_token: Option<String>,
     pub use_github_oidc: bool,
 }
 
@@ -51,7 +51,9 @@ pub struct AttestationConfig {
 /// This function:
 /// 1. Creates an in-toto statement for the package
 /// 2. Uses cosign to sign the statement with GitHub OIDC or other identity
-/// 3. Stores the signed attestation to GitHub's attestation API
+/// 3. Optionally stores the signed attestation to GitHub's attestation API (if token provided)
+///
+/// Returns the attestation bundle JSON or GitHub attestation ID
 pub async fn create_attestation_with_cosign(
     package_path: &Path,
     channel_url: &str,
@@ -67,17 +69,20 @@ pub async fn create_attestation_with_cosign(
     // Step 2: Sign with cosign
     let bundle_json = sign_with_cosign(&statement, package_path, config).await?;
 
-    // Step 3: Store to GitHub
-    let attestation_id = store_attestation_to_github(
-        &bundle_json,
-        &config.github_token,
-        &config.repo_owner,
-        &config.repo_name,
-        client,
-    )
-    .await?;
+    // Step 3: Optionally store to GitHub if token is provided
+    if let (Some(token), Some(owner), Some(repo)) =
+        (&config.github_token, &config.repo_owner, &config.repo_name)
+    {
+        let attestation_id =
+            store_attestation_to_github(&bundle_json, token, owner, repo, client).await?;
 
-    Ok(attestation_id)
+        tracing::info!("Attestation stored to GitHub with ID: {}", attestation_id);
+        Ok(attestation_id)
+    } else {
+        tracing::info!("GitHub token not provided, skipping GitHub attestation storage");
+        // Return the bundle JSON for use elsewhere (e.g., prefix.dev upload)
+        Ok(bundle_json)
+    }
 }
 
 /// Check if cosign is installed and available
@@ -289,35 +294,51 @@ pub async fn create_conda_attestation(
     _oidc_token: &str,
     client: &ClientWithMiddleware,
 ) -> miette::Result<serde_json::Value> {
-    // Try to extract repo info from environment
-    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "unknown/unknown".to_string());
-    let parts: Vec<&str> = repo.split('/').collect();
-    let (owner, repo_name) = if parts.len() == 2 {
-        (parts[0].to_string(), parts[1].to_string())
+    // Try to extract repo info from environment (optional)
+    let (repo_owner, repo_name) = if let Ok(repo) = std::env::var("GITHUB_REPOSITORY") {
+        let parts: Vec<&str> = repo.split('/').collect();
+        if parts.len() == 2 {
+            (Some(parts[0].to_string()), Some(parts[1].to_string()))
+        } else {
+            tracing::warn!(
+                "Invalid GITHUB_REPOSITORY format '{}'. Expected 'owner/repo'. \
+                 GitHub attestation storage will be skipped.",
+                repo
+            );
+            (None, None)
+        }
     } else {
-        return Err(miette::miette!(
-            "Could not determine repository from GITHUB_REPOSITORY environment variable. \
-             Expected format: owner/repo"
-        ));
+        tracing::info!(
+            "GITHUB_REPOSITORY environment variable not set. \
+             GitHub attestation storage will be skipped."
+        );
+        (None, None)
     };
 
-    let github_token = std::env::var("GITHUB_TOKEN")
-        .into_diagnostic()
-        .map_err(|_| miette::miette!("GITHUB_TOKEN environment variable not set"))?;
+    // Try to get GitHub token (optional)
+    let github_token = std::env::var("GITHUB_TOKEN").ok();
+
+    if github_token.is_none() {
+        tracing::info!(
+            "GITHUB_TOKEN environment variable not set. \
+             GitHub attestation storage will be skipped."
+        );
+    }
 
     let config = AttestationConfig {
-        repo_owner: owner,
+        repo_owner,
         repo_name,
         github_token,
         use_github_oidc: true,
     };
 
-    let _attestation_id =
+    let attestation_result =
         create_attestation_with_cosign(package_path, channel_url, &config, client).await?;
 
     // Return a simple success indicator for backward compatibility
     Ok(json!({
         "success": true,
-        "message": "Attestation created with cosign"
+        "message": "Attestation created with cosign",
+        "attestation": attestation_result
     }))
 }
