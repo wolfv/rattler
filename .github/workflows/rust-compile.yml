@@ -98,28 +98,29 @@ jobs:
         run: |
           echo "CARGO_BUILD_OPTIONS=${CARGO_BUILD_OPTIONS} --no-default-features --features rustls-tls" >> $GITHUB_OUTPUT
 
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        if: startsWith(matrix.os, 'ubuntu')
-        with:
-          # this might remove tools that are actually needed,
-          # if set to "true" but frees about 6 GB
-          tool-cache: false
+      # - name: Free Disk Space (Ubuntu)
+      #   uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+      #   if: startsWith(matrix.os, 'ubuntu')
+      #   with:
+      #     # this might remove tools that are actually needed,
+      #     # if set to "true" but frees about 6 GB
+      #     tool-cache: false
 
-          # all of these default to true, but feel free to set to
-          # "false" if necessary for your workflow
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false # Takes a lot of time so lets leave it
-          docker-images: true
-          swap-storage: true
+      #     # all of these default to true, but feel free to set to
+      #     # "false" if necessary for your workflow
+      #     android: true
+      #     dotnet: true
+      #     haskell: true
+      #     large-packages: false # Takes a lot of time so lets leave it
+      #     docker-images: true
+      #     swap-storage: true
 
 
       - name: Run rattler upload with attestation generation
         run: |
-          curl -L -o rich-14.1.0-pyhe01879c_0.conda https://repo.prefix.dev/conda-forge/noarch/rich-13.9.4-pyhd8ed1ab_1.conda
-          cargo run --bin rattler -- upload prefix --generate-attestation -c wolf-private-test rich-14.1.0-pyhe01879c_0.conda
+          export PKG_NAME=rich-13.9.4-pyhd8ed1ab_1.conda
+          curl -L -o $PKG_NAME https://repo.prefix.dev/conda-forge/noarch/$PKG_NAME
+          cargo run --bin rattler -- upload prefix --generate-attestation -c wolf-private-test $PKG_NAME
 
       # - name: Install cargo nextest
       #   if: ${{ !matrix.skip-tests }}
