@@ -44,6 +44,8 @@ pub struct AttestationConfig {
     pub repo_name: Option<String>,
     pub github_token: Option<String>,
     pub use_github_oidc: bool,
+    /// Path to a local cosign private key for testing (optional)
+    pub cosign_private_key: Option<String>,
 }
 
 /// Create and store an attestation for a conda package using cosign
@@ -170,15 +172,57 @@ async fn sign_with_cosign(
     cmd.arg("attest-blob")
         .arg("--predicate")
         .arg(statement_path)
-        .arg("--output-file")
-        .arg("-"); // Output to stdout
+        .arg("--type")
+        .arg("https://schemas.conda.org/attestations-publish-1.schema.json");
 
-    // Configure identity provider
-    if config.use_github_oidc {
-        // Use GitHub OIDC for identity
+    // Check if using local key for testing
+    if let Some(key_path) = &config.cosign_private_key {
+        tracing::info!("Using local cosign key for signing: {}", key_path);
+        cmd.arg("--key").arg(key_path);
+
+        // Check if password is needed
+        if std::env::var("COSIGN_PASSWORD").is_err() {
+            tracing::warn!(
+                "No COSIGN_PASSWORD set. If your key is password-protected, set COSIGN_PASSWORD env var."
+            );
+        }
+
+        // For local key signing, output the bundle to stdout and disable tlog upload
+        cmd.arg("--bundle").arg("-"); // Output bundle to stdout
+        cmd.arg("--tlog-upload=false"); // Don't upload to transparency log for local testing
+    }
+    // Configure identity provider for keyless signing
+    else if config.use_github_oidc {
+        // Check if we're in GitHub Actions
+        let in_github_actions = std::env::var("GITHUB_ACTIONS").is_ok();
+
+        if !in_github_actions {
+            // For local testing, check if user wants to use keyless signing
+            if std::env::var("COSIGN_EXPERIMENTAL").is_ok() {
+                tracing::info!(
+                    "Local testing mode: Using cosign keyless signing.\n\
+                     This will authenticate via browser OAuth flow (Google, GitHub, Microsoft)."
+                );
+                // Don't set COSIGN_YES for local testing - let user see what's happening
+            } else {
+                tracing::warn!(
+                    "Not running in GitHub Actions. To test locally, you can:\n\
+                     1. Set COSIGN_EXPERIMENTAL=1 for keyless signing via browser\n\
+                     2. Use cosign generate-key-pair for local key-based signing"
+                );
+            }
+        }
+
+        // Use experimental keyless signing
         cmd.env("COSIGN_EXPERIMENTAL", "1");
-        // Skip interactive prompts for automated environments
-        cmd.env("COSIGN_YES", "true");
+
+        // Output bundle for keyless signing too
+        cmd.arg("--bundle").arg("-");
+
+        // Only skip prompts in CI environments
+        if in_github_actions || std::env::var("CI").is_ok() {
+            cmd.env("COSIGN_YES", "true");
+        }
 
         // Set GitHub-specific environment if available
         if let Ok(server_url) = std::env::var("GITHUB_SERVER_URL") {
@@ -207,21 +251,49 @@ async fn sign_with_cosign(
         .into_diagnostic()
         .map_err(|e| miette::miette!("Failed to run cosign: {}", e))?;
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(miette::miette!(
-            "cosign attestation failed:\n{}\n\nTroubleshooting:\n\
+            "cosign attestation failed with exit code {:?}:\n\
+             stdout: {}\n\
+             stderr: {}\n\n\
+             Troubleshooting:\n\
              1. Ensure you're running in GitHub Actions with 'id-token: write' permission\n\
              2. Check that GITHUB_TOKEN is set if uploading to GitHub\n\
              3. For local testing, ensure you have valid credentials configured",
-            stderr
+            output.status.code(),
+            if stdout.is_empty() {
+                "(empty)"
+            } else {
+                &stdout
+            },
+            if stderr.is_empty() {
+                "(empty)"
+            } else {
+                &stderr
+            }
         ));
     }
 
-    let bundle_json = String::from_utf8_lossy(&output.stdout).to_string();
+    let bundle_json = stdout.to_string();
 
     if bundle_json.is_empty() {
-        return Err(miette::miette!("cosign produced empty output"));
+        return Err(miette::miette!(
+            "cosign produced empty output despite success exit code.\n\
+             stderr output: {}\n\n\
+             This usually means:\n\
+             1. OIDC authentication failed silently\n\
+             2. You're not in a GitHub Actions environment\n\
+             3. The 'id-token: write' permission is missing\n\
+             4. The ACTIONS_ID_TOKEN_REQUEST_URL environment variable is not set",
+            if stderr.is_empty() {
+                "(empty)"
+            } else {
+                &stderr
+            }
+        ));
     }
 
     tracing::info!("Successfully created attestation with cosign");
@@ -332,6 +404,7 @@ pub async fn create_conda_attestation(
         repo_name,
         github_token,
         use_github_oidc: true,
+        cosign_private_key: std::env::var("COSIGN_KEY_PATH").ok(),
     };
 
     let attestation_result =
