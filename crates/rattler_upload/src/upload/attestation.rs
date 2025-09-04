@@ -235,6 +235,7 @@ async fn sign_with_cosign(
             .to_string_lossy()
             .to_string();
         cmd.arg("--bundle").arg(&bundle_path);
+        cmd.arg("--new-bundle-format=true"); // Use the new Sigstore bundle format (v0.3)
 
         // Only skip prompts in CI environments
         if in_github_actions || std::env::var("CI").is_ok() {
