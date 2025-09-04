@@ -116,7 +116,6 @@ async fn check_cosign_installed() -> miette::Result<()> {
 async fn create_conda_predicate(channel_url: &str) -> miette::Result<serde_json::Value> {
     Ok(json!({
         "targetChannel": channel_url,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }
 
