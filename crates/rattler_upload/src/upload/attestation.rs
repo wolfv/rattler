@@ -65,11 +65,11 @@ pub async fn create_attestation_with_cosign(
     // Check if cosign is installed
     check_cosign_installed().await?;
 
-    // Step 1: Create the in-toto statement
-    let statement = create_intoto_statement(package_path, channel_url).await?;
+    // Step 1: Create just the predicate data for cosign (not a full statement)
+    let predicate = create_conda_predicate(package_path, channel_url).await?;
 
     // Step 2: Sign with cosign
-    let bundle_json = sign_with_cosign(&statement, package_path, config).await?;
+    let bundle_json = sign_with_cosign(&predicate, package_path, config).await?;
 
     // Step 3: Optionally store to GitHub if token is provided
     if let (Some(token), Some(owner), Some(repo)) =
@@ -114,7 +114,18 @@ async fn check_cosign_installed() -> miette::Result<()> {
     Ok(())
 }
 
-/// Create an in-toto statement for a conda package
+/// Create just the predicate data for conda package attestation
+async fn create_conda_predicate(
+    package_path: &Path,
+    channel_url: &str,
+) -> miette::Result<serde_json::Value> {
+    Ok(json!({
+        "targetChannel": channel_url,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Create an in-toto statement for a conda package (for backward compatibility)
 async fn create_intoto_statement(
     package_path: &Path,
     channel_url: &str,
@@ -142,28 +153,28 @@ async fn create_intoto_statement(
     })
 }
 
-/// Sign an in-toto statement using cosign
+/// Sign a predicate using cosign
 async fn sign_with_cosign(
-    statement: &Statement,
+    predicate: &serde_json::Value,
     package_path: &Path,
     config: &AttestationConfig,
 ) -> miette::Result<String> {
-    // Create a temporary file for the statement
-    let mut statement_file = NamedTempFile::new().into_diagnostic()?;
-    let statement_json = serde_json::to_string_pretty(statement).into_diagnostic()?;
+    // Create a temporary file for the predicate
+    let mut predicate_file = NamedTempFile::new().into_diagnostic()?;
+    let predicate_json = serde_json::to_string_pretty(predicate).into_diagnostic()?;
 
-    // Write statement to temp file
+    // Write predicate to temp file
     use std::io::Write;
-    statement_file
-        .write_all(statement_json.as_bytes())
+    predicate_file
+        .write_all(predicate_json.as_bytes())
         .into_diagnostic()?;
-    statement_file.flush().into_diagnostic()?;
+    predicate_file.flush().into_diagnostic()?;
 
-    let statement_path = statement_file.path();
+    let predicate_path = predicate_file.path();
 
     tracing::debug!(
-        "Signing statement with cosign: {}",
-        statement_path.display()
+        "Signing predicate with cosign: {}",
+        predicate_path.display()
     );
 
     // Build cosign attest command
@@ -171,7 +182,7 @@ async fn sign_with_cosign(
     let mut cmd = AsyncCommand::new("cosign");
     cmd.arg("attest-blob")
         .arg("--predicate")
-        .arg(statement_path)
+        .arg(predicate_path)
         .arg("--type")
         .arg("https://schemas.conda.org/attestations-publish-1.schema.json");
 
