@@ -3,7 +3,7 @@ use reqwest::header;
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
+use std::{io::Write as _, path::Path};
 use tempfile::NamedTempFile;
 use tokio::process::Command as AsyncCommand;
 
@@ -130,7 +130,6 @@ async fn sign_with_cosign(
     let predicate_json = serde_json::to_string_pretty(predicate).into_diagnostic()?;
 
     // Write predicate to temp file
-    use std::io::Write;
     predicate_file
         .write_all(predicate_json.as_bytes())
         .into_diagnostic()?;
@@ -190,7 +189,6 @@ async fn sign_with_cosign(
                     "Local testing mode: Using cosign keyless signing.\n\
                      This will authenticate via browser OAuth flow (Google, GitHub, Microsoft)."
                 );
-                // Don't set COSIGN_YES for local testing - let user see what's happening
             } else {
                 tracing::warn!(
                     "Not running in GitHub Actions. To test locally, you can:\n\
@@ -331,7 +329,10 @@ async fn sign_with_cosign(
 
     tracing::info!("Successfully created attestation with cosign");
 
-    Ok(bundle_json)
+    // Post-process the bundle to add missing timestampVerificationData field if needed
+    let processed_bundle = post_process_sigstore_bundle(&bundle_json)?;
+
+    Ok(processed_bundle)
 }
 
 /// Store a signed attestation bundle to GitHub's attestation API
@@ -392,6 +393,45 @@ async fn store_attestation_to_github(
     );
 
     Ok(response_data.id)
+}
+
+/// Post-process a Sigstore bundle to add missing timestampVerificationData field
+/// This is a temporary workaround for server compatibility
+fn post_process_sigstore_bundle(bundle_json: &str) -> miette::Result<String> {
+    // Try to parse as JSON to check if it's a Sigstore bundle
+    let mut bundle: serde_json::Value = match serde_json::from_str(bundle_json) {
+        Ok(value) => value,
+        Err(_) => {
+            // Not valid JSON or not a Sigstore bundle, return as-is
+            return Ok(bundle_json.to_string());
+        }
+    };
+
+    // Check if this looks like a Sigstore bundle (has mediaType and verificationMaterial)
+    if let Some(obj) = bundle.as_object_mut() {
+        if obj.contains_key("mediaType") && obj.contains_key("verificationMaterial") {
+            // This is a Sigstore bundle, check if timestampVerificationData is missing
+            if let Some(verification_material) = obj.get_mut("verificationMaterial") {
+                if let Some(vm_obj) = verification_material.as_object_mut() {
+                    if !vm_obj.contains_key("timestampVerificationData") {
+                        // Add empty timestampVerificationData field
+                        vm_obj.insert(
+                            "timestampVerificationData".to_string(),
+                            serde_json::Value::Null,
+                        );
+                        tracing::debug!(
+                            "Added empty timestampVerificationData field to Sigstore bundle"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Serialize back to JSON
+    serde_json::to_string(&bundle)
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("Failed to serialize post-processed bundle: {}", e))
 }
 
 // Backward compatibility function
