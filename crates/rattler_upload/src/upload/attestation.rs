@@ -417,7 +417,7 @@ fn post_process_sigstore_bundle(bundle_json: &str) -> miette::Result<String> {
                         // Add empty timestampVerificationData field
                         vm_obj.insert(
                             "timestampVerificationData".to_string(),
-                            serde_json::Value::Null,
+                            serde_json::Value::Object(serde_json::Map::new()),
                         );
                         tracing::debug!(
                             "Added empty timestampVerificationData field to Sigstore bundle"
