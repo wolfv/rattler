@@ -66,7 +66,7 @@ pub async fn create_attestation_with_cosign(
     check_cosign_installed().await?;
 
     // Step 1: Create just the predicate data for cosign (not a full statement)
-    let predicate = create_conda_predicate(package_path, channel_url).await?;
+    let predicate = create_conda_predicate(channel_url).await?;
 
     // Step 2: Sign with cosign
     let bundle_json = sign_with_cosign(&predicate, package_path, config).await?;
@@ -115,42 +115,11 @@ async fn check_cosign_installed() -> miette::Result<()> {
 }
 
 /// Create just the predicate data for conda package attestation
-async fn create_conda_predicate(
-    package_path: &Path,
-    channel_url: &str,
-) -> miette::Result<serde_json::Value> {
+async fn create_conda_predicate(channel_url: &str) -> miette::Result<serde_json::Value> {
     Ok(json!({
         "targetChannel": channel_url,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
-}
-
-/// Create an in-toto statement for a conda package (for backward compatibility)
-async fn create_intoto_statement(
-    package_path: &Path,
-    channel_url: &str,
-) -> miette::Result<Statement> {
-    let package_hash = sha256_sum(package_path).into_diagnostic()?;
-    let package_name = package_path
-        .file_name()
-        .ok_or_else(|| miette::miette!("Package path has no filename"))?
-        .to_string_lossy()
-        .to_string();
-
-    Ok(Statement {
-        statement_type: "https://in-toto.io/Statement/v1".to_string(),
-        subject: vec![Subject {
-            name: package_name,
-            digest: DigestSet {
-                sha256: package_hash,
-            },
-        }],
-        predicate_type: "https://schemas.conda.org/attestations-publish-1.schema.json".to_string(),
-        predicate: json!({
-            "targetChannel": channel_url,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        }),
-    })
 }
 
 /// Sign a predicate using cosign
