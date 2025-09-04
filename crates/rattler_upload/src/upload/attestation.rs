@@ -7,8 +7,6 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 use tokio::process::Command as AsyncCommand;
 
-use crate::upload::package::sha256_sum;
-
 /// In-toto Statement structure for conda packages
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Statement {
