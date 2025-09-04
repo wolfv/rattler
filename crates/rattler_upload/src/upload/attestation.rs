@@ -175,8 +175,13 @@ async fn sign_with_cosign(
         .arg("--type")
         .arg("https://schemas.conda.org/attestations-publish-1.schema.json");
 
+    // Bundle file for keyless signing (declare here so it's accessible later)
+    let bundle_file: Option<NamedTempFile>;
+
     // Check if using local key for testing
     if let Some(key_path) = &config.cosign_private_key {
+        bundle_file = None; // Not needed for local key signing
+
         tracing::info!("Using local cosign key for signing: {}", key_path);
         cmd.arg("--key").arg(key_path);
 
@@ -190,6 +195,11 @@ async fn sign_with_cosign(
         // For local key signing, output the bundle to stdout and disable tlog upload
         cmd.arg("--bundle").arg("-"); // Output bundle to stdout
         cmd.arg("--tlog-upload=false"); // Don't upload to transparency log for local testing
+
+        tracing::warn!(
+            "Local key signing produces DSSE format, not Sigstore bundle format.\n\
+             For prefix.dev uploads, use keyless signing (GitHub Actions) to get proper Sigstore bundles."
+        );
     }
     // Configure identity provider for keyless signing
     else if config.use_github_oidc {
@@ -216,8 +226,15 @@ async fn sign_with_cosign(
         // Use experimental keyless signing
         cmd.env("COSIGN_EXPERIMENTAL", "1");
 
-        // Output bundle for keyless signing too
-        cmd.arg("--bundle").arg("-");
+        // For keyless signing, we need to output to a temp file to get proper Sigstore bundle format
+        bundle_file = Some(NamedTempFile::new().into_diagnostic()?);
+        let bundle_path = bundle_file
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_string_lossy()
+            .to_string();
+        cmd.arg("--bundle").arg(&bundle_path);
 
         // Only skip prompts in CI environments
         if in_github_actions || std::env::var("CI").is_ok() {
@@ -236,6 +253,8 @@ async fn sign_with_cosign(
                 cmd.env("SIGSTORE_REKOR_URL", ""); // GitHub uses TSA, not Rekor
             }
         }
+    } else {
+        bundle_file = None;
     }
 
     // Add the blob (package file) to attest
@@ -277,24 +296,37 @@ async fn sign_with_cosign(
         ));
     }
 
-    let bundle_json = stdout.to_string();
+    // Get the bundle JSON - either from stdout (local key) or from bundle file (keyless)
+    let bundle_json = if config.cosign_private_key.is_some() {
+        // Local key signing outputs to stdout
+        let result = stdout.to_string();
+        if result.is_empty() {
+            return Err(miette::miette!(
+                "cosign produced empty output for local key signing.\n\
+                 stderr output: {}",
+                if stderr.is_empty() {
+                    "(empty)"
+                } else {
+                    &stderr
+                }
+            ));
+        }
+        result
+    } else if let Some(ref bundle_file) = bundle_file {
+        // Keyless signing outputs to bundle file
+        if !stdout.is_empty() {
+            tracing::warn!("Unexpected stdout output from keyless signing: {}", stdout);
+        }
 
-    if bundle_json.is_empty() {
+        // Read the bundle file that was created during keyless signing
+        std::fs::read_to_string(bundle_file.path())
+            .into_diagnostic()
+            .map_err(|e| miette::miette!("Failed to read bundle file: {}", e))?
+    } else {
         return Err(miette::miette!(
-            "cosign produced empty output despite success exit code.\n\
-             stderr output: {}\n\n\
-             This usually means:\n\
-             1. OIDC authentication failed silently\n\
-             2. You're not in a GitHub Actions environment\n\
-             3. The 'id-token: write' permission is missing\n\
-             4. The ACTIONS_ID_TOKEN_REQUEST_URL environment variable is not set",
-            if stderr.is_empty() {
-                "(empty)"
-            } else {
-                &stderr
-            }
+            "Neither local key nor bundle file available for reading attestation result"
         ));
-    }
+    };
 
     tracing::info!("Successfully created attestation with cosign");
 
