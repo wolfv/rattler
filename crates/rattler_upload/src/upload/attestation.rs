@@ -313,15 +313,38 @@ async fn sign_with_cosign(
         }
         result
     } else if let Some(ref bundle_file) = bundle_file {
-        // Keyless signing outputs to bundle file
+        // Keyless signing may output to both stdout and bundle file
+        // Check if stdout contains the output (happens in some cosign versions)
         if !stdout.is_empty() {
-            tracing::warn!("Unexpected stdout output from keyless signing: {}", stdout);
-        }
+            tracing::info!("Cosign output to stdout, checking format...");
 
-        // Read the bundle file that was created during keyless signing
-        std::fs::read_to_string(bundle_file.path())
-            .into_diagnostic()
-            .map_err(|e| miette::miette!("Failed to read bundle file: {}", e))?
+            // Check if stdout is a proper Sigstore bundle or just DSSE
+            if stdout.contains("\"mediaType\"") || stdout.contains("\"rekorBundle\"") {
+                // This looks like a Sigstore bundle
+                tracing::info!("Using Sigstore bundle from stdout");
+                stdout.to_string()
+            } else {
+                // stdout contains DSSE, try reading the bundle file
+                tracing::info!("Stdout contains DSSE format, reading bundle file instead");
+                let bundle_content = std::fs::read_to_string(bundle_file.path())
+                    .into_diagnostic()
+                    .map_err(|e| miette::miette!("Failed to read bundle file: {}", e))?;
+
+                if !bundle_content.is_empty() {
+                    tracing::info!("Using bundle from file");
+                    bundle_content
+                } else {
+                    // Bundle file is empty, fall back to stdout (DSSE format)
+                    tracing::warn!("Bundle file is empty, using DSSE format from stdout");
+                    stdout.to_string()
+                }
+            }
+        } else {
+            // No stdout, read from bundle file
+            std::fs::read_to_string(bundle_file.path())
+                .into_diagnostic()
+                .map_err(|e| miette::miette!("Failed to read bundle file: {}", e))?
+        }
     } else {
         return Err(miette::miette!(
             "Neither local key nor bundle file available for reading attestation result"
@@ -442,10 +465,20 @@ pub async fn create_conda_attestation(
     let attestation_result =
         create_attestation_with_cosign(package_path, channel_url, &config, client).await?;
 
-    // Return a simple success indicator for backward compatibility
-    Ok(json!({
-        "success": true,
-        "message": "Attestation created with cosign",
-        "attestation": attestation_result
-    }))
+    // Check if this looks like a Sigstore bundle that should be returned raw
+    if attestation_result.contains("\"rekorBundle\"")
+        || attestation_result.contains("\"base64Signature\"")
+    {
+        // This is a Sigstore bundle, parse and return it directly
+        serde_json::from_str(&attestation_result)
+            .into_diagnostic()
+            .map_err(|e| miette::miette!("Failed to parse Sigstore bundle: {}", e))
+    } else {
+        // Return a simple success indicator for backward compatibility
+        Ok(json!({
+            "success": true,
+            "message": "Attestation created with cosign",
+            "attestation": attestation_result
+        }))
+    }
 }
