@@ -466,20 +466,7 @@ pub async fn create_conda_attestation(
     let attestation_result =
         create_attestation_with_cosign(package_path, channel_url, &config, client).await?;
 
-    // Check if this looks like a Sigstore bundle that should be returned raw
-    if attestation_result.contains("\"rekorBundle\"")
-        || attestation_result.contains("\"base64Signature\"")
-    {
-        // This is a Sigstore bundle, parse and return it directly
-        serde_json::from_str(&attestation_result)
-            .into_diagnostic()
-            .map_err(|e| miette::miette!("Failed to parse Sigstore bundle: {}", e))
-    } else {
-        // Return a simple success indicator for backward compatibility
-        Ok(json!({
-            "success": true,
-            "message": "Attestation created with cosign",
-            "attestation": attestation_result
-        }))
-    }
+    serde_json::from_str(&attestation_result)
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("Failed to parse Sigstore bundle: {}", e))
 }
