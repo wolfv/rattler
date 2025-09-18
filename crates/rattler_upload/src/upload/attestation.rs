@@ -7,6 +7,13 @@ use std::{io::Write as _, path::Path};
 use tempfile::NamedTempFile;
 use tokio::process::Command as AsyncCommand;
 
+/// Conda V1 predicate
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CondaV1Predicate {
+    #[serde(rename = "targetChannel", skip_serializing_if = "Option::is_none")]
+    pub target_channel: Option<String>,
+}
+
 /// In-toto Statement structure for conda packages
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Statement {
@@ -15,7 +22,7 @@ pub struct Statement {
     pub subject: Vec<Subject>,
     #[serde(rename = "predicateType")]
     pub predicate_type: String,
-    pub predicate: serde_json::Value,
+    pub predicate: CondaV1Predicate,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,10 +71,10 @@ pub async fn create_attestation_with_cosign(
     check_cosign_installed().await?;
 
     // Step 1: Create just the predicate data for cosign (not a full statement)
-    let predicate = create_conda_predicate(channel_url).await?;
+    let predicate = create_conda_intoto_statement(package_path, channel_url).await?;
 
     // Step 2: Sign with cosign
-    let bundle_json = sign_with_cosign(&predicate, package_path, config).await?;
+    let bundle_json = sign_with_cosign(predicate.path(), package_path, config).await?;
 
     // Step 3: Optionally store to GitHub if token is provided
     if let (Some(token), Some(owner), Some(repo)) =
@@ -113,30 +120,50 @@ async fn check_cosign_installed() -> miette::Result<()> {
 }
 
 /// Create just the predicate data for conda package attestation
-async fn create_conda_predicate(channel_url: &str) -> miette::Result<serde_json::Value> {
-    Ok(json!({
-        "targetChannel": channel_url,
-    }))
+async fn create_conda_intoto_statement(
+    filepath: &Path,
+    channel_url: &str,
+) -> miette::Result<tempfile::NamedTempFile> {
+    let mut temp_file = NamedTempFile::new().into_diagnostic()?;
+    let subject = Subject {
+        name: filepath
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| miette::miette!("Invalid package file name"))?
+            .to_string(),
+        digest: {
+            let digest = rattler_digest::compute_file_digest::<rattler_digest::Sha256>(filepath)
+                .into_diagnostic()?;
+            DigestSet {
+                sha256: format!("{digest:x}"),
+            }
+        },
+    };
+
+    let statement = Statement {
+        statement_type: "https://in-toto.io/Statement/v1".to_string(),
+        subject: vec![subject],
+        predicate_type: "https://schemas.conda.org/attestations-publish-1.schema.json".to_string(),
+        predicate: CondaV1Predicate {
+            target_channel: Some(channel_url.to_string()),
+        },
+    };
+    temp_file
+        .write_all(
+            serde_json::to_string(&statement)
+                .into_diagnostic()?
+                .as_bytes(),
+        )
+        .into_diagnostic()?;
+    Ok(temp_file)
 }
 
 /// Sign a predicate using cosign
 async fn sign_with_cosign(
-    predicate: &serde_json::Value,
+    predicate_path: &Path,
     package_path: &Path,
     config: &AttestationConfig,
 ) -> miette::Result<String> {
-    // Create a temporary file for the predicate
-    let mut predicate_file = NamedTempFile::new().into_diagnostic()?;
-    let predicate_json = serde_json::to_string_pretty(predicate).into_diagnostic()?;
-
-    // Write predicate to temp file
-    predicate_file
-        .write_all(predicate_json.as_bytes())
-        .into_diagnostic()?;
-    predicate_file.flush().into_diagnostic()?;
-
-    let predicate_path = predicate_file.path();
-
     tracing::debug!(
         "Signing predicate with cosign: {}",
         predicate_path.display()
@@ -146,7 +173,7 @@ async fn sign_with_cosign(
     // For conda packages, we'll use cosign attest-blob since we don't have an OCI image
     let mut cmd = AsyncCommand::new("cosign");
     cmd.arg("attest-blob")
-        .arg("--predicate")
+        .arg("--statement")
         .arg(predicate_path)
         .arg("--type")
         .arg("https://schemas.conda.org/attestations-publish-1.schema.json");
@@ -329,10 +356,7 @@ async fn sign_with_cosign(
 
     tracing::info!("Successfully created attestation with cosign");
 
-    // Post-process the bundle to add missing timestampVerificationData field if needed
-    let processed_bundle = post_process_sigstore_bundle(&bundle_json)?;
-
-    Ok(processed_bundle)
+    Ok(bundle_json)
 }
 
 /// Store a signed attestation bundle to GitHub's attestation API
@@ -393,45 +417,6 @@ async fn store_attestation_to_github(
     );
 
     Ok(response_data.id)
-}
-
-/// Post-process a Sigstore bundle to add missing timestampVerificationData field
-/// This is a temporary workaround for server compatibility
-fn post_process_sigstore_bundle(bundle_json: &str) -> miette::Result<String> {
-    // Try to parse as JSON to check if it's a Sigstore bundle
-    let mut bundle: serde_json::Value = match serde_json::from_str(bundle_json) {
-        Ok(value) => value,
-        Err(_) => {
-            // Not valid JSON or not a Sigstore bundle, return as-is
-            return Ok(bundle_json.to_string());
-        }
-    };
-
-    // Check if this looks like a Sigstore bundle (has mediaType and verificationMaterial)
-    if let Some(obj) = bundle.as_object_mut() {
-        if obj.contains_key("mediaType") && obj.contains_key("verificationMaterial") {
-            // This is a Sigstore bundle, check if timestampVerificationData is missing
-            if let Some(verification_material) = obj.get_mut("verificationMaterial") {
-                if let Some(vm_obj) = verification_material.as_object_mut() {
-                    if !vm_obj.contains_key("timestampVerificationData") {
-                        // Add empty timestampVerificationData field
-                        vm_obj.insert(
-                            "timestampVerificationData".to_string(),
-                            serde_json::Value::Object(serde_json::Map::new()),
-                        );
-                        tracing::debug!(
-                            "Added empty timestampVerificationData field to Sigstore bundle"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Serialize back to JSON
-    serde_json::to_string(&bundle)
-        .into_diagnostic()
-        .map_err(|e| miette::miette!("Failed to serialize post-processed bundle: {}", e))
 }
 
 // Backward compatibility function
