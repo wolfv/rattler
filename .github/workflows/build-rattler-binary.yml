@@ -2,7 +2,7 @@ name: Build Rattler Binary
 
 on:
   push:
-    branches: [main, perf]
+    branches: [main, perf_rattler]
   pull_request:
     paths:
       - crates/**
