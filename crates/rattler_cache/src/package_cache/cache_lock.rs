@@ -8,7 +8,6 @@ use std::{
 
 use digest::generic_array::GenericArray;
 use fs4::fs_std::FileExt;
-use parking_lot::Mutex;
 use rattler_digest::Sha256Hash;
 
 use crate::package_cache::PackageCacheLayerError;
@@ -116,7 +115,7 @@ impl CacheLock {
 }
 
 pub struct CacheRwLock {
-    file: Arc<Mutex<std::fs::File>>,
+    file: Arc<std::fs::File>,
 }
 
 impl CacheRwLock {
@@ -141,7 +140,7 @@ impl CacheRwLock {
                 })?;
 
             Ok(CacheRwLock {
-                file: Arc::new(Mutex::new(file)),
+                file: Arc::new(file),
             })
         })
         .await
@@ -170,7 +169,7 @@ impl CacheRwLock {
                 })?;
 
             Ok(CacheRwLock {
-                file: Arc::new(Mutex::new(file)),
+                file: Arc::new(file),
             })
         })
         .await
@@ -184,12 +183,11 @@ impl CacheRwLock {
         sha256: Option<&Sha256Hash>,
     ) -> Result<(), PackageCacheLayerError> {
         let file = self.file.clone();
+
         let sha256 = sha256.cloned();
         simple_spawn_blocking::tokio::run_blocking_task(move || {
-            let mut file = file.lock();
-
             // Ensure we write from the start of the file
-            file.rewind().map_err(|e| {
+            (&*file).rewind().map_err(|e| {
                 PackageCacheLayerError::LockError(
                     "failed to rewind cache lock for reading revision".to_string(),
                     e,
@@ -198,7 +196,7 @@ impl CacheRwLock {
 
             // Write the bytes of the revision
             let revision_bytes = revision.to_be_bytes();
-            file.write_all(&revision_bytes).map_err(|e| {
+            (&*file).write_all(&revision_bytes).map_err(|e| {
                 PackageCacheLayerError::LockError(
                     "failed to write revision from cache lock".to_string(),
                     e,
@@ -209,7 +207,7 @@ impl CacheRwLock {
             let sha_bytes = if let Some(sha) = sha256 {
                 let len = sha.len();
                 let sha = &sha[..];
-                file.write_all(sha).map_err(|e| {
+                (&*file).write_all(sha).map_err(|e| {
                     PackageCacheLayerError::LockError(
                         "failed to write sha256 from cache lock".to_string(),
                         e,
@@ -220,10 +218,8 @@ impl CacheRwLock {
                 0
             };
 
-            // Ensure all bytes are written to disk and immediately visible to other processes.
-            // Use sync_all() instead of flush() to ensure the revision is written through
-            // to disk, preventing race conditions on Linux where flush() only writes to OS buffers.
-            file.sync_all().map_err(|e| {
+            // Ensure all bytes are written to disk
+            (&*file).flush().map_err(|e| {
                 PackageCacheLayerError::LockError(
                     "failed to sync cache lock after writing revision".to_string(),
                     e,
@@ -248,15 +244,14 @@ impl CacheRwLock {
 impl CacheRwLock {
     /// Reads the revision from the cache lock file.
     pub fn read_revision(&mut self) -> Result<u64, PackageCacheLayerError> {
-        let mut file = self.file.lock();
-        file.rewind().map_err(|e| {
+        self.file.rewind().map_err(|e| {
             PackageCacheLayerError::LockError(
                 "failed to rewind cache lock for reading revision".to_string(),
                 e,
             )
         })?;
         let mut buf = [0; 8];
-        match file.read_exact(&mut buf) {
+        match self.file.read_exact(&mut buf) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(0);
@@ -275,21 +270,20 @@ impl CacheRwLock {
     pub fn read_sha256(&mut self) -> Result<Option<Sha256Hash>, PackageCacheLayerError> {
         const SHA256_LEN: usize = 32;
         const REVISION_LEN: u64 = 8;
-        let mut file = self.file.lock();
-        file.rewind().map_err(|e| {
+        self.file.rewind().map_err(|e| {
             PackageCacheLayerError::LockError(
                 "failed to rewind cache lock for reading sha256".to_string(),
                 e,
             )
         })?;
         let mut buf = [0; SHA256_LEN];
-        let _ = file.seek(SeekFrom::Start(REVISION_LEN)).map_err(|e| {
+        let _ = self.file.seek(SeekFrom::Start(REVISION_LEN)).map_err(|e| {
             PackageCacheLayerError::LockError(
                 "failed to seek to sha256 in cache lock".to_string(),
                 e,
             )
         })?;
-        match file.read_exact(&mut buf) {
+        match self.file.read_exact(&mut buf) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(None);
