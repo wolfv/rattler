@@ -15,10 +15,7 @@ use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 use url::Url;
 
-use super::opt::{
-    // ← Import from sibling module
-    PrefixData,
-};
+use super::opt::{AttestationSource, PrefixData};
 
 #[cfg(feature = "sigstore")]
 use crate::upload::attestation::{create_attestation, AttestationConfig};
@@ -107,42 +104,41 @@ pub async fn upload_package_to_prefix(
 
     let client = get_client_with_retry().into_diagnostic()?;
 
-    // Check if attestation generation is requested but sigstore feature is not enabled
-    #[cfg(not(feature = "sigstore"))]
-    if prefix_data.generate_attestation {
-        return Err(miette::miette!(
-            "Attestation generation was requested, but the 'sigstore' feature is not enabled.\n\
-             Please rebuild with the 'sigstore' feature enabled."
-        ));
-    }
+    let wants_attestation = !matches!(prefix_data.attestation, AttestationSource::NoAttestation);
 
     // Check if we're using trusted publishing and if we should generate attestations
     #[cfg(feature = "sigstore")]
-    let (token, should_generate_attestation) = match prefix_data.api_key {
-        Some(api_key) => (api_key, false),
-        None => match check_trusted_publishing(&client, &prefix_data.url).await {
-            TrustedPublishResult::Configured(token) => {
-                // When using trusted publishing, we can generate attestations
-                (token.secret().to_string(), prefix_data.generate_attestation)
-            }
-            TrustedPublishResult::Skipped => {
-                if prefix_data.attestation.is_some() || prefix_data.generate_attestation {
-                    return Err(miette::miette!(
-                        "Attestation was requested, but trusted publishing is not configured"
-                    ));
+    let (token, should_generate_attestation) = {
+        let wants_generate = matches!(
+            prefix_data.attestation,
+            AttestationSource::GenerateAttestation
+        );
+        match prefix_data.api_key {
+            Some(api_key) => (api_key, false),
+            None => match check_trusted_publishing(&client, &prefix_data.url).await {
+                TrustedPublishResult::Configured(token) => {
+                    // When using trusted publishing, we can generate attestations
+                    (token.secret().to_string(), wants_generate)
                 }
-                (check_storage()?, false)
-            }
-            TrustedPublishResult::Ignored(err) => {
-                tracing::warn!("Checked for trusted publishing but failed with {err}");
-                if prefix_data.attestation.is_some() || prefix_data.generate_attestation {
-                    return Err(miette::miette!(
-                        "Attestation was requested, but trusted publishing is not configured"
-                    ));
+                TrustedPublishResult::Skipped => {
+                    if wants_attestation {
+                        return Err(miette::miette!(
+                            "Attestation was requested, but trusted publishing is not configured"
+                        ));
+                    }
+                    (check_storage()?, false)
                 }
-                (check_storage()?, false)
-            }
-        },
+                TrustedPublishResult::Ignored(err) => {
+                    tracing::warn!("Checked for trusted publishing but failed with {err}");
+                    if wants_attestation {
+                        return Err(miette::miette!(
+                            "Attestation was requested, but trusted publishing is not configured"
+                        ));
+                    }
+                    (check_storage()?, false)
+                }
+            },
+        }
     };
 
     #[cfg(not(feature = "sigstore"))]
@@ -151,7 +147,7 @@ pub async fn upload_package_to_prefix(
         None => match check_trusted_publishing(&client, &prefix_data.url).await {
             TrustedPublishResult::Configured(token) => token.secret().to_string(),
             TrustedPublishResult::Skipped => {
-                if prefix_data.attestation.is_some() {
+                if wants_attestation {
                     return Err(miette::miette!(
                         "Attestation was requested, but trusted publishing is not configured"
                     ));
@@ -160,7 +156,7 @@ pub async fn upload_package_to_prefix(
             }
             TrustedPublishResult::Ignored(err) => {
                 tracing::warn!("Checked for trusted publishing but failed with {err}");
-                if prefix_data.attestation.is_some() {
+                if wants_attestation {
                     return Err(miette::miette!(
                         "Attestation was requested, but trusted publishing is not configured"
                     ));
@@ -177,12 +173,16 @@ pub async fn upload_package_to_prefix(
             .to_string_lossy()
             .to_string();
         let file_size = package_file.metadata().into_diagnostic()?.len();
-        let url = prefix_data
+        let mut url = prefix_data
             .url
             .join(&format!("api/v1/upload/{}", prefix_data.channel))
             .into_diagnostic()?;
 
-        // Generate attestation if we're using trusted publishing and it was requested
+        if prefix_data.force.is_enabled() {
+            url.query_pairs_mut().append_pair("force", "true");
+        }
+
+        // Determine attestation path based on attestation source
         #[cfg(feature = "sigstore")]
         let attestation_path = if should_generate_attestation {
             let channel_url = prefix_data
@@ -223,12 +223,17 @@ pub async fn upload_package_to_prefix(
                     ));
                 }
             }
+        } else if let AttestationSource::Attestation(path) = &prefix_data.attestation {
+            Some(path.clone())
         } else {
-            prefix_data.attestation.clone()
+            None
         };
 
         #[cfg(not(feature = "sigstore"))]
-        let attestation_path = prefix_data.attestation.clone();
+        let attestation_path = match &prefix_data.attestation {
+            AttestationSource::Attestation(path) => Some(path.clone()),
+            _ => None,
+        };
 
         let progress_bar = indicatif::ProgressBar::new(file_size)
             .with_prefix("Uploading")
@@ -280,8 +285,8 @@ pub async fn upload_package_to_prefix(
                     return Err(miette::miette!("Authentication error: {}", err));
                 }
                 StatusCode::CONFLICT => {
-                    // skip if package is existed
-                    if prefix_data.skip_existing {
+                    // skip if package already exists
+                    if prefix_data.skip_existing.is_enabled() {
                         progress_bar.finish();
                         info!("Skip existing package: {}", filename);
                         return Ok(());
