@@ -4856,6 +4856,7 @@ dependencies = [
  "chrono",
  "clap",
  "console 0.16.2",
+ "dunce",
  "indicatif",
  "itertools 0.14.0",
  "miette",

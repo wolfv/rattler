@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::Parser;
 use miette::IntoDiagnostic;
@@ -29,7 +29,7 @@ pub async fn install_menu(opts: InstallOpt) -> miette::Result<()> {
                 opts.target_prefix
             )
         })?;
-    let prefix = fs::canonicalize(&opts.target_prefix).into_diagnostic()?;
+    let prefix = dunce::canonicalize(&opts.target_prefix).into_diagnostic()?;
     rattler_menuinst::install_menuitems_for_record(
         &prefix,
         record,
