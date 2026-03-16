@@ -301,11 +301,6 @@ async fn login(
         let flow = match args.oauth_flow.as_deref() {
             Some("auth-code") => oauth::OAuthFlow::AuthCode,
             Some("device-code") => oauth::OAuthFlow::DeviceCode,
-            _ if is_anaconda => {
-                // Anaconda's OAuth server only accepts a fixed redirect URI,
-                // so default to device code flow which doesn't need one.
-                oauth::OAuthFlow::DeviceCode
-            }
             _ => oauth::OAuthFlow::Auto,
         };
 
@@ -319,12 +314,20 @@ async fn login(
             args.oauth_scopes.into_iter().collect()
         };
 
+        let redirect_uri = if is_anaconda {
+            // Anaconda's OAuth server only accepts this specific redirect URI
+            Some("http://127.0.0.1:8000/auth/oidc".to_string())
+        } else {
+            None
+        };
+
         let config = oauth::OAuthConfig {
             issuer_url,
             client_id,
             client_secret: args.oauth_client_secret,
             flow,
             scopes,
+            redirect_uri,
         };
 
         if is_anaconda {

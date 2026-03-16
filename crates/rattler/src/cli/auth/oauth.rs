@@ -66,6 +66,11 @@ pub struct OAuthConfig {
     pub flow: OAuthFlow,
     /// Additional OAuth scopes to request.
     pub scopes: HashSet<String>,
+    /// Fixed redirect URI for auth code flow. If set, the local server will
+    /// bind to the port and path specified in this URI instead of using a
+    /// random port. Required by providers that only accept pre-registered
+    /// redirect URIs (e.g. Anaconda).
+    pub redirect_uri: Option<String>,
 }
 
 /// Which OAuth flow to attempt.
@@ -183,6 +188,7 @@ pub async fn perform_oauth_login_raw(config: OAuthConfig) -> Result<OAuthLoginRe
     let client_secret = config.client_secret.as_deref();
 
     // 2. Run the appropriate flow
+    let redirect_uri = config.redirect_uri.as_deref();
     let tokens = match config.flow {
         OAuthFlow::AuthCode => {
             auth_code_flow(
@@ -190,6 +196,7 @@ pub async fn perform_oauth_login_raw(config: OAuthConfig) -> Result<OAuthLoginRe
                 &config.client_id,
                 client_secret,
                 &config.scopes,
+                redirect_uri,
                 &http_client,
             )
             .await?
@@ -210,6 +217,7 @@ pub async fn perform_oauth_login_raw(config: OAuthConfig) -> Result<OAuthLoginRe
                 &config.client_id,
                 client_secret,
                 &config.scopes,
+                redirect_uri,
                 &http_client,
             )
             .await
@@ -421,12 +429,21 @@ async fn auth_code_flow(
     client_id: &str,
     client_secret: Option<&str>,
     scopes: &HashSet<String>,
+    fixed_redirect_uri: Option<&str>,
     http_client: &reqwest::Client,
 ) -> Result<OAuthTokens, OAuthError> {
-    // Bind to a random port on localhost
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let local_addr = listener.local_addr()?;
-    let redirect_url = format!("http://127.0.0.1:{}", local_addr.port());
+    // Bind to either the fixed redirect URI's port or a random port
+    let (listener, redirect_url) = if let Some(uri) = fixed_redirect_uri {
+        let parsed = Url::parse(uri).map_err(OAuthError::UrlParse)?;
+        let port = parsed.port().unwrap_or(8000);
+        let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+        (listener, uri.to_string())
+    } else {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let url = format!("http://127.0.0.1:{port}");
+        (listener, url)
+    };
 
     let mut client = CoreClient::from_provider_metadata(
         endpoints.provider_metadata.clone(),
