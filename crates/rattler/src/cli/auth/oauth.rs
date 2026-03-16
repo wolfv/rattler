@@ -146,11 +146,34 @@ struct CallbackResult {
     stream: std::net::TcpStream,
 }
 
-/// Perform an OAuth/OIDC login and return the resulting
-/// `Authentication::OAuth`.
-pub async fn perform_oauth_login(config: OAuthConfig) -> Result<Authentication, OAuthError> {
+/// The raw tokens from an OAuth flow, before being converted to an
+/// `Authentication` value.
+pub struct OAuthLoginResult {
+    /// The OAuth access token.
+    pub access_token: String,
+    /// The OAuth refresh token, if available.
+    pub refresh_token: Option<String>,
+    /// How long until the access token expires.
+    pub expires_in: Option<Duration>,
+    /// The token endpoint URL.
+    pub token_endpoint: String,
+    /// The revocation endpoint URL, if available.
+    pub revocation_endpoint: Option<String>,
+    /// The client ID used.
+    pub client_id: String,
+    /// The display name of the authenticated user, if available.
+    pub authenticated_as: Option<String>,
+}
+
+/// Perform an OAuth/OIDC login and return the raw result.
+///
+/// This is useful when you need the access token for further processing
+/// (e.g. exchanging it for a platform-specific API key) before storing
+/// credentials.
+pub async fn perform_oauth_login_raw(config: OAuthConfig) -> Result<OAuthLoginResult, OAuthError> {
     let http_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .user_agent(format!("rattler-auth/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(OAuthError::Network)?;
 
@@ -216,8 +239,23 @@ pub async fn perform_oauth_login(config: OAuthConfig) -> Result<Authentication, 
         None => eprintln!("Authentication successful."),
     }
 
-    // 4. Build the Authentication::OAuth value
-    let expires_at = tokens.expires_in.map(|d| {
+    Ok(OAuthLoginResult {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_in: tokens.expires_in,
+        token_endpoint: endpoints.token_endpoint,
+        revocation_endpoint: endpoints.revocation_endpoint,
+        client_id: config.client_id,
+        authenticated_as: tokens.authenticated_as,
+    })
+}
+
+/// Perform an OAuth/OIDC login and return the resulting
+/// `Authentication::OAuth`.
+pub async fn perform_oauth_login(config: OAuthConfig) -> Result<Authentication, OAuthError> {
+    let result = perform_oauth_login_raw(config).await?;
+
+    let expires_at = result.expires_in.map(|d| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -226,20 +264,33 @@ pub async fn perform_oauth_login(config: OAuthConfig) -> Result<Authentication, 
     });
 
     Ok(Authentication::OAuth {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
+        access_token: result.access_token,
+        refresh_token: result.refresh_token,
         expires_at,
-        token_endpoint: endpoints.token_endpoint,
-        revocation_endpoint: endpoints.revocation_endpoint,
-        client_id: config.client_id,
+        token_endpoint: result.token_endpoint,
+        revocation_endpoint: result.revocation_endpoint,
+        client_id: result.client_id,
     })
+}
+
+/// Raw OIDC discovery response for providers that don't include all
+/// fields required by the OpenID Connect specification (e.g. Anaconda).
+#[derive(Deserialize)]
+struct RawDiscoveryResponse {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+    #[serde(default)]
+    device_authorization_endpoint: Option<String>,
+    #[serde(default)]
+    revocation_endpoint: Option<String>,
 }
 
 /// Perform OIDC discovery and extract all needed endpoints.
 ///
-/// Uses our custom `ExtendedCoreProviderMetadata` type so that the
-/// `revocation_endpoint` and `device_authorization_endpoint` fields are
-/// deserialized from the discovery document in a single request.
+/// First tries the strict `openidconnect` crate discovery which validates all
+/// required OIDC fields. If that fails (e.g. for providers like Anaconda that
+/// omit `subject_types_supported`), falls back to manual JSON parsing.
 async fn discover_endpoints(
     http_client: &reqwest::Client,
     issuer_url: &str,
@@ -247,20 +298,109 @@ async fn discover_endpoints(
     let oidc_issuer =
         IssuerUrl::new(issuer_url.to_string()).map_err(|e| OAuthError::Discovery(e.to_string()))?;
 
-    let provider_metadata = ExtendedCoreProviderMetadata::discover_async(oidc_issuer, http_client)
-        .await
+    // Try strict OIDC discovery first
+    match ExtendedCoreProviderMetadata::discover_async(oidc_issuer.clone(), http_client).await {
+        Ok(provider_metadata) => {
+            let token_endpoint = provider_metadata
+                .token_endpoint()
+                .map(|u| u.url().to_string())
+                .ok_or_else(|| {
+                    OAuthError::Discovery(
+                        "provider metadata does not include a token endpoint".into(),
+                    )
+                })?;
+
+            let extra = provider_metadata.additional_metadata();
+            let revocation_endpoint = extra.revocation_endpoint.clone();
+            let device_authorization_endpoint = extra.device_authorization_endpoint.clone();
+
+            Ok(DiscoveredEndpoints {
+                provider_metadata,
+                token_endpoint,
+                revocation_endpoint,
+                device_authorization_endpoint,
+            })
+        }
+        Err(strict_err) => {
+            // Fall back to manual discovery for non-conforming providers
+            tracing::debug!(
+                "Strict OIDC discovery failed ({strict_err}), trying manual discovery..."
+            );
+            discover_endpoints_manual(http_client, &oidc_issuer).await
+        }
+    }
+}
+
+/// Manual OIDC discovery fallback for providers that don't include all
+/// required fields (like `subject_types_supported`).
+///
+/// Fetches the discovery document directly, extracts the endpoints we need,
+/// and constructs a `ProviderMetadata` with sensible defaults for the
+/// missing required fields.
+async fn discover_endpoints_manual(
+    http_client: &reqwest::Client,
+    issuer_url: &IssuerUrl,
+) -> Result<DiscoveredEndpoints, OAuthError> {
+    let discovery_url = issuer_url
+        .join(".well-known/openid-configuration")
         .map_err(|e| OAuthError::Discovery(e.to_string()))?;
 
-    let token_endpoint = provider_metadata
-        .token_endpoint()
-        .map(|u| u.url().to_string())
-        .ok_or_else(|| {
-            OAuthError::Discovery("provider metadata does not include a token endpoint".into())
-        })?;
+    let response = http_client
+        .get(discovery_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(OAuthError::Network)?;
 
-    let extra = provider_metadata.additional_metadata();
-    let revocation_endpoint = extra.revocation_endpoint.clone();
-    let device_authorization_endpoint = extra.device_authorization_endpoint.clone();
+    if !response.status().is_success() {
+        return Err(OAuthError::Discovery(format!(
+            "HTTP status code {} at {}",
+            response.status(),
+            issuer_url.as_str()
+        )));
+    }
+
+    let raw: RawDiscoveryResponse = response
+        .json()
+        .await
+        .map_err(|e| OAuthError::Discovery(format!("failed to parse discovery document: {e}")))?;
+
+    // Build a proper ProviderMetadata with defaults for missing required
+    // fields
+    use openidconnect::{
+        core::{CoreJwsSigningAlgorithm, CoreSubjectIdentifierType},
+        AuthUrl, JsonWebKeySetUrl, ResponseTypes,
+    };
+
+    let provider_metadata = ExtendedCoreProviderMetadata::new(
+        issuer_url.clone(),
+        AuthUrl::new(raw.authorization_endpoint)
+            .map_err(|e| OAuthError::Discovery(e.to_string()))?,
+        JsonWebKeySetUrl::new(raw.jwks_uri).map_err(|e| OAuthError::Discovery(e.to_string()))?,
+        // Required: at least one response type
+        vec![ResponseTypes::new(vec![CoreResponseType::Code])],
+        // Required: default subject type
+        vec![CoreSubjectIdentifierType::Public],
+        // Required: default signing algorithm
+        vec![CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256],
+        ExtendedProviderMetadata {
+            revocation_endpoint: raw.revocation_endpoint.clone(),
+            device_authorization_endpoint: raw.device_authorization_endpoint.clone(),
+        },
+    )
+    .set_token_endpoint(Some(
+        openidconnect::TokenUrl::new(raw.token_endpoint.clone())
+            .map_err(|e| OAuthError::Discovery(e.to_string()))?,
+    ));
+
+    let device_authorization_endpoint = raw.device_authorization_endpoint;
+    let revocation_endpoint = raw.revocation_endpoint;
+    let token_endpoint = raw.token_endpoint;
+
+    // Note: JWKS is initialized empty by `new()`. ID token signature
+    // verification will be skipped, but that is acceptable for providers
+    // whose discovery document is non-conforming — the token endpoint
+    // response is already authenticated via TLS.
 
     Ok(DiscoveredEndpoints {
         provider_metadata,

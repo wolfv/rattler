@@ -128,9 +128,14 @@ pub enum AuthenticationCLIError {
 
     /// Bad authentication method when using anaconda.org
     #[error(
-        "Authentication with anaconda.org requires a conda token. Use `--conda-token` to provide one"
+        "Authentication with anaconda.org requires a conda token or OAuth. Use `--conda-token` or `--oauth` to authenticate"
     )]
     AnacondaOrgBadMethod,
+
+    /// Failed to exchange OAuth access token for an Anaconda API key
+    #[cfg(feature = "oauth")]
+    #[error("Failed to exchange OAuth token for Anaconda API key: {0}")]
+    AnacondaApiKeyExchange(String),
 
     /// Bad authentication method when using S3
     #[error(
@@ -194,6 +199,75 @@ pub enum ValidationResult {
     Invalid,
 }
 
+/// Exchange an OAuth access token for an Anaconda API key.
+///
+/// This calls the Anaconda API key creation endpoint using the short-lived
+/// OAuth access token as a Bearer token. The returned API key can be used
+/// as a conda token for subsequent API calls.
+#[cfg(feature = "oauth")]
+async fn exchange_anaconda_api_key(
+    access_token: &str,
+    host: &str,
+) -> Result<String, AuthenticationCLIError> {
+    // Determine the auth domain from the host
+    let auth_domain = if host.contains("anaconda.com") {
+        // e.g. api.anaconda.com -> auth.anaconda.com
+        "auth.anaconda.com".to_string()
+    } else {
+        // anaconda.org -> auth.anaconda.com (the centralized auth service)
+        "auth.anaconda.com".to_string()
+    };
+
+    let client = Client::builder()
+        .user_agent(format!("rattler-auth/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    // Try the auth domain endpoint first, then fall back to the API domain
+    let urls = [
+        format!("https://{auth_domain}/api/auth/api-keys"),
+        format!("https://{host}/api/iam/api-keys"),
+    ];
+
+    let mut last_error = String::new();
+    for url in &urls {
+        let response = client
+            .post(url)
+            .bearer_auth(access_token)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&json!({
+                "scopes": ["cloud:read", "cloud:write", "repo:read"],
+                "tags": ["rattler-auth"],
+            }))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status.as_u16() == 201 {
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| AuthenticationCLIError::JsonParseError(e.to_string()))?;
+
+            let api_key = body["api_key"]
+                .as_str()
+                .ok_or_else(|| {
+                    AuthenticationCLIError::AnacondaApiKeyExchange(
+                        "response missing 'api_key' field".into(),
+                    )
+                })?
+                .to_string();
+
+            return Ok(api_key);
+        }
+
+        let body = response.text().await.unwrap_or_default();
+        last_error = format!("{url}: HTTP {status} — {body}");
+        tracing::debug!("API key exchange failed: {last_error}");
+    }
+
+    Err(AuthenticationCLIError::AnacondaApiKeyExchange(last_error))
+}
+
 /// Authenticate with a host using the provided credentials.
 ///
 /// This function validates the authentication method based on the host and
@@ -206,16 +280,43 @@ async fn login(
     // OAuth flow (when --oauth is set)
     #[cfg(feature = "oauth")]
     if args.oauth {
-        let issuer_url = args
-            .oauth_issuer_url
-            .unwrap_or_else(|| format!("https://{}", args.host));
-        let client_id = args
-            .oauth_client_id
-            .unwrap_or_else(|| "rattler".to_string());
+        let is_anaconda = args.host.contains("anaconda.org") || args.host.contains("anaconda.com");
+
+        let issuer_url = args.oauth_issuer_url.unwrap_or_else(|| {
+            if is_anaconda {
+                // Anaconda uses auth.anaconda.com as the OIDC issuer
+                "https://auth.anaconda.com/api/auth".to_string()
+            } else {
+                format!("https://{}", args.host)
+            }
+        });
+        let client_id = args.oauth_client_id.unwrap_or_else(|| {
+            if is_anaconda {
+                // Default Anaconda OAuth client ID
+                "b4ad7f1d-c784-46b5-a9fe-106e50441f5a".to_string()
+            } else {
+                "rattler".to_string()
+            }
+        });
         let flow = match args.oauth_flow.as_deref() {
             Some("auth-code") => oauth::OAuthFlow::AuthCode,
             Some("device-code") => oauth::OAuthFlow::DeviceCode,
+            _ if is_anaconda => {
+                // Anaconda's OAuth server only accepts a fixed redirect URI,
+                // so default to device code flow which doesn't need one.
+                oauth::OAuthFlow::DeviceCode
+            }
             _ => oauth::OAuthFlow::Auto,
+        };
+
+        let scopes: std::collections::HashSet<String> = if args.oauth_scopes.is_empty() {
+            if is_anaconda {
+                ["openid".to_string()].into_iter().collect()
+            } else {
+                Default::default()
+            }
+        } else {
+            args.oauth_scopes.into_iter().collect()
         };
 
         let config = oauth::OAuthConfig {
@@ -223,14 +324,24 @@ async fn login(
             client_id,
             client_secret: args.oauth_client_secret,
             flow,
-            scopes: args.oauth_scopes.into_iter().collect(),
+            scopes,
         };
 
-        let auth = oauth::perform_oauth_login(config).await?;
-        // OAuth credentials are issuer-specific, skip wildcard conversion
-        let host = args.host.clone();
-        storage.store(&host, &auth)?;
-        eprintln!("Credentials stored for {host}.");
+        if is_anaconda {
+            // Anaconda OAuth: get access token, then exchange for API key
+            let result = oauth::perform_oauth_login_raw(config).await?;
+            let api_key = exchange_anaconda_api_key(&result.access_token, &args.host).await?;
+            let auth = Authentication::CondaToken(api_key);
+            let host = get_url(&args.host)?;
+            storage.store(&host, &auth)?;
+            eprintln!("Credentials stored for {host}.");
+        } else {
+            let auth = oauth::perform_oauth_login(config).await?;
+            // OAuth credentials are issuer-specific, skip wildcard conversion
+            let host = args.host.clone();
+            storage.store(&host, &auth)?;
+            eprintln!("Credentials stored for {host}.");
+        }
         return Ok(());
     }
 
@@ -261,7 +372,9 @@ async fn login(
         return Err(AuthenticationCLIError::PrefixDevBadMethod);
     }
 
-    if args.host.contains("anaconda.org") && !matches!(auth, Authentication::CondaToken(_)) {
+    if (args.host.contains("anaconda.org") || args.host.contains("anaconda.com"))
+        && !matches!(auth, Authentication::CondaToken(_))
+    {
         return Err(AuthenticationCLIError::AnacondaOrgBadMethod);
     }
 
