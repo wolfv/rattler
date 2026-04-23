@@ -50,10 +50,12 @@ async fn get_channel_target_from_variant_config(
 pub async fn upload_packages_to_conda_forge(
     package_files: &Vec<PathBuf>,
     conda_forge_data: CondaForgeData,
+    user_agent: &str,
 ) -> miette::Result<()> {
     let anaconda = anaconda::Anaconda::new(
         conda_forge_data.staging_token,
         conda_forge_data.anaconda_url,
+        user_agent,
     );
 
     let mut channels: HashMap<String, HashMap<_, _>> = HashMap::new();
@@ -131,7 +133,7 @@ pub async fn upload_packages_to_conda_forge(
             "provider": conda_forge_data.provider
         });
 
-        let client = get_default_client().into_diagnostic()?;
+        let client = get_default_client(user_agent).into_diagnostic()?;
 
         debug!(
             "Sending payload to validation endpoint: {}",

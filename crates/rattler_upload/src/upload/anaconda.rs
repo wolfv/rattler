@@ -16,7 +16,6 @@ use url::Url;
 use crate::upload::opt::ForceOverwrite;
 
 use super::package::ExtractedPackage;
-use crate::tool_configuration::APP_USER_AGENT;
 
 /// Errors that can occur during Anaconda.org operations.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -123,7 +122,7 @@ struct FileStageResponse {
 }
 
 impl Anaconda {
-    pub fn new(token: String, url: UrlWithTrailingSlash) -> Self {
+    pub fn new(token: String, url: UrlWithTrailingSlash, user_agent: &str) -> Self {
         let mut default_headers = reqwest::header::HeaderMap::new();
 
         default_headers.append(
@@ -142,7 +141,7 @@ impl Anaconda {
 
         let client = Client::builder()
             .no_gzip()
-            .user_agent(APP_USER_AGENT)
+            .user_agent(user_agent)
             .default_headers(default_headers)
             .build()
             .expect("failed to create client");

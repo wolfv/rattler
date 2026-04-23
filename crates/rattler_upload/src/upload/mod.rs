@@ -1,8 +1,6 @@
 //! The upload module provides the package upload functionality.
 
-use crate::{
-    tool_configuration::APP_USER_AGENT, AnacondaData, ArtifactoryData, CloudsmithData, QuetzData,
-};
+use crate::{AnacondaData, ArtifactoryData, CloudsmithData, QuetzData};
 use fs_err::tokio as fs;
 use futures::TryStreamExt;
 use indicatif::{style::TemplateError, HumanBytes, ProgressState};
@@ -63,18 +61,20 @@ fn default_bytes_style() -> Result<indicatif::ProgressStyle, TemplateError> {
             ))
 }
 
-fn get_default_client() -> Result<reqwest::Client, reqwest::Error> {
+pub(crate) fn get_default_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .no_gzip()
-        .user_agent(APP_USER_AGENT)
+        .user_agent(user_agent)
         .build()
 }
 
 /// Returns a reqwest client with retry middleware.
-fn get_client_with_retry() -> Result<reqwest_middleware::ClientWithMiddleware, reqwest::Error> {
+pub(crate) fn get_client_with_retry(
+    user_agent: &str,
+) -> Result<reqwest_middleware::ClientWithMiddleware, reqwest::Error> {
     let client = reqwest::Client::builder()
         .no_gzip()
-        .user_agent(APP_USER_AGENT)
+        .user_agent(user_agent)
         .build()?;
 
     Ok(reqwest_middleware::ClientBuilder::new(client)
@@ -89,6 +89,7 @@ pub async fn upload_package_to_quetz(
     storage: &AuthenticationStorage,
     package_files: &Vec<PathBuf>,
     quetz_data: QuetzData,
+    user_agent: &str,
 ) -> miette::Result<()> {
     let token = match quetz_data.api_key {
         Some(api_key) => api_key,
@@ -111,7 +112,7 @@ pub async fn upload_package_to_quetz(
         },
     };
 
-    let client = get_default_client().into_diagnostic()?;
+    let client = get_default_client(user_agent).into_diagnostic()?;
 
     for package_file in package_files {
         let upload_url = quetz_data
@@ -143,6 +144,7 @@ pub async fn upload_package_to_artifactory(
     storage: &AuthenticationStorage,
     package_files: &Vec<PathBuf>,
     artifactory_data: ArtifactoryData,
+    user_agent: &str,
 ) -> miette::Result<()> {
     let token = match artifactory_data.token {
         Some(t) => t,
@@ -192,7 +194,7 @@ pub async fn upload_package_to_artifactory(
             package_file.display()
         ))?;
 
-        let client = get_default_client().into_diagnostic()?;
+        let client = get_default_client(user_agent).into_diagnostic()?;
 
         let upload_url = artifactory_data
             .url
@@ -219,6 +221,7 @@ pub async fn upload_package_to_anaconda(
     storage: &AuthenticationStorage,
     package_files: &Vec<PathBuf>,
     anaconda_data: AnacondaData,
+    user_agent: &str,
 ) -> Result<(), anaconda::AnacondaError> {
     let token = match anaconda_data.api_key {
         Some(token) => token,
@@ -238,7 +241,7 @@ pub async fn upload_package_to_anaconda(
         },
     };
 
-    let anaconda = anaconda::Anaconda::new(token, anaconda_data.url);
+    let anaconda = anaconda::Anaconda::new(token, anaconda_data.url, user_agent);
 
     for package_file in package_files {
         loop {
@@ -277,6 +280,7 @@ pub async fn upload_package_to_cloudsmith(
     storage: &AuthenticationStorage,
     package_files: &Vec<PathBuf>,
     cloudsmith_data: CloudsmithData,
+    user_agent: &str,
 ) -> Result<(), cloudsmith::CloudsmithError> {
     let token = match cloudsmith_data.api_key {
         Some(token) => token,
@@ -304,6 +308,7 @@ pub async fn upload_package_to_cloudsmith(
         cloudsmith_data.url,
         cloudsmith_data.owner,
         cloudsmith_data.repo,
+        user_agent,
     );
 
     for package_file in package_files {
@@ -476,6 +481,7 @@ mod test {
     use axum::{http::StatusCode, Router};
     use rattler_networking::AuthenticationStorage;
 
+    use crate::tool_configuration::APP_USER_AGENT;
     use crate::upload::opt::{ArtifactoryData, QuetzData};
     use crate::upload::test_utils::{start_test_server, test_package_path};
 
@@ -514,8 +520,13 @@ mod test {
             "test-channel".to_string(),
             Some("test-api-key".to_string()),
         );
-        let result =
-            super::upload_package_to_quetz(&storage, &vec![test_package_path()], quetz_data).await;
+        let result = super::upload_package_to_quetz(
+            &storage,
+            &vec![test_package_path()],
+            quetz_data,
+            APP_USER_AGENT,
+        )
+        .await;
         assert!(result.is_ok(), "{:?}", result.unwrap_err());
     }
 
@@ -526,8 +537,13 @@ mod test {
         let storage = AuthenticationStorage::empty();
         let quetz_data =
             QuetzData::new(url, "test-channel".to_string(), Some("bad-key".to_string()));
-        let result =
-            super::upload_package_to_quetz(&storage, &vec![test_package_path()], quetz_data).await;
+        let result = super::upload_package_to_quetz(
+            &storage,
+            &vec![test_package_path()],
+            quetz_data,
+            APP_USER_AGENT,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -541,8 +557,13 @@ mod test {
             "test-channel".to_string(),
             Some("test-key".to_string()),
         );
-        let result =
-            super::upload_package_to_quetz(&storage, &vec![test_package_path()], quetz_data).await;
+        let result = super::upload_package_to_quetz(
+            &storage,
+            &vec![test_package_path()],
+            quetz_data,
+            APP_USER_AGENT,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -560,6 +581,7 @@ mod test {
             &storage,
             &vec![test_package_path()],
             artifactory_data,
+            APP_USER_AGENT,
         )
         .await;
         assert!(result.is_ok(), "{:?}", result.unwrap_err());
@@ -579,6 +601,7 @@ mod test {
             &storage,
             &vec![test_package_path()],
             artifactory_data,
+            APP_USER_AGENT,
         )
         .await;
         assert!(result.is_err());
@@ -651,6 +674,7 @@ mod test {
             &storage,
             &vec![test_package_path()],
             cloudsmith_data,
+            APP_USER_AGENT,
         )
         .await;
         assert!(result.is_ok(), "{:?}", result.unwrap_err());
@@ -669,6 +693,7 @@ mod test {
             &storage,
             &vec![test_package_path()],
             cloudsmith_data,
+            APP_USER_AGENT,
         )
         .await;
         assert!(result.is_err());

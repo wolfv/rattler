@@ -168,6 +168,7 @@ pub async fn upload_package_to_prefix(
     storage: &AuthenticationStorage,
     package_files: &Vec<PathBuf>,
     prefix_data: PrefixData,
+    user_agent: &str,
 ) -> Result<(), PrefixUploadError> {
     let check_storage = || match storage.get_by_url(Url::from(prefix_data.url.clone())) {
         Ok((_, Some(Authentication::BearerToken(token)))) => Ok(token),
@@ -178,7 +179,7 @@ pub async fn upload_package_to_prefix(
         }),
     };
 
-    let client = get_client_with_retry().into_diagnostic()?;
+    let client = get_client_with_retry(user_agent).into_diagnostic()?;
 
     let wants_attestation = !matches!(prefix_data.attestation, AttestationSource::NoAttestation);
     let wants_generate = matches!(
@@ -364,7 +365,7 @@ pub async fn upload_package_to_prefix(
             )
             .await?;
 
-            let response = get_default_client()
+            let response = get_default_client(user_agent)
                 .into_diagnostic()?
                 .post(url.clone())
                 .multipart(form)

@@ -5,8 +5,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::{debug, info};
 
-use crate::tool_configuration::APP_USER_AGENT;
-
 /// Chunk size for multi-part uploads (100 MB).
 pub const CHUNK_SIZE: usize = 1024 * 1024 * 100;
 
@@ -101,7 +99,13 @@ pub struct Cloudsmith {
 }
 
 impl Cloudsmith {
-    pub fn new(api_key: String, url: UrlWithTrailingSlash, owner: String, repo: String) -> Self {
+    pub fn new(
+        api_key: String,
+        url: UrlWithTrailingSlash,
+        owner: String,
+        repo: String,
+        user_agent: &str,
+    ) -> Self {
         let mut default_headers = reqwest::header::HeaderMap::new();
         default_headers.append(
             "Accept",
@@ -114,7 +118,7 @@ impl Cloudsmith {
 
         let client = Client::builder()
             .no_gzip()
-            .user_agent(APP_USER_AGENT)
+            .user_agent(user_agent)
             .default_headers(default_headers)
             .build()
             .expect("failed to create client");
@@ -358,6 +362,7 @@ mod test {
             url.into(),
             "test-owner".to_string(),
             "test-repo".to_string(),
+            crate::tool_configuration::APP_USER_AGENT,
         );
 
         let result = client
@@ -376,6 +381,7 @@ mod test {
             url.into(),
             "test-owner".to_string(),
             "test-repo".to_string(),
+            crate::tool_configuration::APP_USER_AGENT,
         );
 
         let result = client
@@ -462,6 +468,7 @@ mod test {
             base_url.into(),
             "test-owner".to_string(),
             "test-repo".to_string(),
+            crate::tool_configuration::APP_USER_AGENT,
         );
 
         let package_path = crate::upload::test_utils::test_package_path();

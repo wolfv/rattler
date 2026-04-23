@@ -104,11 +104,21 @@ pub struct UploadOpts {
 
     #[clap(skip)]
     pub auth_store: Option<AuthenticationStorage>,
+
+    /// Override the HTTP user agent sent with all upload requests.
+    /// When `None`, defaults to `rattler_upload/<version>`.
+    #[clap(skip)]
+    pub user_agent: Option<String>,
 }
 
 impl UploadOpts {
     pub fn with_auth_store(mut self, auth_store: Option<AuthenticationStorage>) -> Self {
         self.auth_store = auth_store;
+        self
+    }
+
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = Some(user_agent.into());
         self
     }
 }

@@ -8,7 +8,7 @@ use upload::opt::{
     ServerType, UploadOpts,
 };
 
-use crate::utils::tool_configuration;
+use crate::utils::tool_configuration::{self, APP_USER_AGENT};
 /// Upload package to different channels
 pub async fn upload_from_args(args: UploadOpts) -> miette::Result<()> {
     // Validate package files are provided
@@ -30,35 +30,55 @@ pub async fn upload_from_args(args: UploadOpts) -> miette::Result<()> {
     let store = tool_configuration::get_auth_store(args.common.auth_file, args.auth_store)
         .into_diagnostic()?;
 
+    let user_agent = args.user_agent.as_deref().unwrap_or(APP_USER_AGENT);
+
     // Upload handler based on server type
     match args.server_type {
         ServerType::Quetz(quetz_opts) => {
             let quetz_data = QuetzData::from(quetz_opts);
-            upload::upload_package_to_quetz(&store, &args.package_files, quetz_data).await
+            upload::upload_package_to_quetz(&store, &args.package_files, quetz_data, user_agent)
+                .await
         }
         ServerType::Artifactory(artifactory_opts) => {
             let artifactory_data = ArtifactoryData::try_from(artifactory_opts)?;
 
-            upload::upload_package_to_artifactory(&store, &args.package_files, artifactory_data)
-                .await
+            upload::upload_package_to_artifactory(
+                &store,
+                &args.package_files,
+                artifactory_data,
+                user_agent,
+            )
+            .await
         }
         ServerType::Prefix(prefix_opts) => {
             let prefix_data = PrefixData::from(prefix_opts);
-            Ok(upload::upload_package_to_prefix(&store, &args.package_files, prefix_data).await?)
+            Ok(upload::upload_package_to_prefix(
+                &store,
+                &args.package_files,
+                prefix_data,
+                user_agent,
+            )
+            .await?)
         }
         ServerType::Anaconda(anaconda_opts) => {
             let anaconda_data = AnacondaData::from(anaconda_opts);
-            Ok(
-                upload::upload_package_to_anaconda(&store, &args.package_files, anaconda_data)
-                    .await?,
+            Ok(upload::upload_package_to_anaconda(
+                &store,
+                &args.package_files,
+                anaconda_data,
+                user_agent,
             )
+            .await?)
         }
         ServerType::Cloudsmith(cloudsmith_opts) => {
             let cloudsmith_data = CloudsmithData::from(cloudsmith_opts);
-            Ok(
-                upload::upload_package_to_cloudsmith(&store, &args.package_files, cloudsmith_data)
-                    .await?,
+            Ok(upload::upload_package_to_cloudsmith(
+                &store,
+                &args.package_files,
+                cloudsmith_data,
+                user_agent,
             )
+            .await?)
         }
         #[cfg(feature = "s3")]
         ServerType::S3(s3_opts) => {
@@ -76,6 +96,7 @@ pub async fn upload_from_args(args: UploadOpts) -> miette::Result<()> {
             upload::conda_forge::upload_packages_to_conda_forge(
                 &args.package_files,
                 conda_forge_data,
+                user_agent,
             )
             .await
         }
