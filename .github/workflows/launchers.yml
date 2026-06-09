@@ -104,7 +104,7 @@ jobs:
     name: Commit signed launchers
     needs: build
     # Only commit signed binaries, and never from a fork.
-    if: needs.build.outputs.signed == 'true' && github.repository == 'mamba-org/rattler'
+    if: needs.build.outputs.signed == 'true' && github.repository == 'conda/rattler'
     runs-on: ubuntu-latest
     permissions:
       contents: write
