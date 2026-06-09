@@ -114,3 +114,17 @@ e2e-s3-aws = "nu scripts/e2e/s3-aws.nu"
 [environments.s3]
 features = ["s3"]
 no-default-feature = true
+
+#------------------------------
+# Windows entry-point launchers
+#------------------------------
+[feature.launchers.dependencies]
+zig = "0.14.*"
+python = ">=3.9"
+
+[feature.launchers.tasks]
+build-launchers = { cmd = "python crates/rattler/launcher/build-launchers.py", description = "Build the Windows entry-point launchers with Zig" }
+
+[environments.launchers]
+features = ["launchers"]
+no-default-feature = true

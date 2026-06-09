@@ -1,0 +1,137 @@
+name: Update Launcher Binaries
+
+# Builds the Windows Python entry-point launchers (cli-32/64/arm64) from the
+# vendored sources in `crates/rattler/launcher/`, code-signs them with Azure
+# Trusted Signing (prefix.dev's signing key), and commits the signed binaries
+# back into `crates/rattler/resources/`.
+#
+# Zig cross-compiles every Windows target from a single host, so the whole
+# matrix (including win-arm64) is built on one x64 runner; signing also runs
+# there because the signing tooling requires Windows.
+#
+# When the Azure signing secrets are not available (e.g. on a fork), the
+# launchers are still built and uploaded as an artifact, but signing and the
+# commit-back step are skipped.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - launcher-build-branch
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & sign launchers
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write # required for Azure OIDC login
+    outputs:
+      signed: ${{ steps.signing-secrets.outputs.available }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11 # v0.9.6
+        with:
+          environments: launchers
+
+      - name: Build launchers
+        run: pixi run -e launchers build-launchers
+
+      - name: Check for signing secrets
+        id: signing-secrets
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.AZURE_CLIENT_ID }}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Azure signing secrets not available; launchers were built but NOT signed."
+          fi
+
+      - name: Azure login (OIDC)
+        if: steps.signing-secrets.outputs.available == 'true'
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign Windows launchers
+        if: steps.signing-secrets.outputs.available == 'true'
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files-folder: crates/rattler/launcher/binaries
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify signatures
+        if: steps.signing-secrets.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          $exitCode = 0
+          foreach ($exe in (Get-ChildItem "crates/rattler/launcher/binaries/*.exe")) {
+            Write-Host "==> $($exe.Name)"
+            $sig = Get-AuthenticodeSignature -FilePath $exe.FullName
+            $sig | Format-List * | Out-String | Write-Host
+            if ($sig.Status -ne 'Valid') {
+              Write-Error "Signature verification failed for $($exe.Name)!"
+              $exitCode = 1
+            }
+          }
+          exit $exitCode
+
+      - name: Upload launchers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: launchers
+          path: crates/rattler/launcher/binaries/cli-*.exe
+          if-no-files-found: error
+
+  commit:
+    name: Commit signed launchers
+    needs: build
+    # Only commit signed binaries, and never from a fork.
+    if: needs.build.outputs.signed == 'true' && github.repository == 'mamba-org/rattler'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download signed launchers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: launchers
+          path: crates/rattler/resources/
+
+      - name: List downloaded files
+        run: ls -l crates/rattler/resources/cli-*.exe
+
+      - name: Commit and push updated launchers
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add crates/rattler/resources/cli-32.exe \
+                  crates/rattler/resources/cli-64.exe \
+                  crates/rattler/resources/cli-arm64.exe
+          if git diff --cached --quiet; then
+            echo "No launcher changes to commit."
+            exit 0
+          fi
+          git commit -m "[CI]: Update signed Windows entry-point launchers"
+          BRANCH=${GITHUB_REF#refs/heads/}
+          git push origin HEAD:$BRANCH
