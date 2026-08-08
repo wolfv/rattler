@@ -20,6 +20,37 @@ mod channel_url;
 pub use channel_url::ChannelUrl;
 
 const DEFAULT_CHANNEL_ALIAS: &str = "https://conda.anaconda.org";
+const PREFIX_DEV_CHANNEL_ALIAS: &str = "https://prefix.dev/";
+
+/// Parses a URL, expanding the `pfx://` shorthand to `https://prefix.dev/`.
+///
+/// Everything after `pfx://` is treated as a path below prefix.dev. This makes
+/// `pfx://conda-forge` equivalent to `https://prefix.dev/conda-forge` and also
+/// works for package URLs below a channel.
+pub(crate) fn parse_url_with_pfx(input: &str) -> Result<Url, url::ParseError> {
+    let Some(scheme) = parse_scheme(input) else {
+        return Url::parse(input);
+    };
+
+    if scheme.eq_ignore_ascii_case("pfx") {
+        Url::parse(&format!(
+            "{PREFIX_DEV_CHANNEL_ALIAS}{}",
+            &input[scheme.len() + "://".len()..]
+        ))
+    } else {
+        Url::parse(input)
+    }
+}
+
+fn expand_pfx_url(url: Url) -> Url {
+    if url.scheme().eq_ignore_ascii_case("pfx") {
+        // The URL has already parsed successfully, and the fixed HTTPS prefix is
+        // valid, so expansion cannot fail.
+        parse_url_with_pfx(url.as_str()).expect("a parsed pfx URL should expand")
+    } else {
+        url
+    }
+}
 
 /// The `ChannelConfig` describes properties that are required to resolve
 /// "simple" channel names to channel URLs.
@@ -120,7 +151,7 @@ impl NamedChannelOrUrl {
                 }
                 base_url.into()
             }
-            NamedChannelOrUrl::Url(url) => url.into(),
+            NamedChannelOrUrl::Url(url) => expand_pfx_url(url).into(),
             NamedChannelOrUrl::Path(path) => {
                 let absolute_path = absolute_path(path.as_str(), &config.root_dir)?;
                 directory_path_to_url(absolute_path.to_path())
@@ -158,7 +189,7 @@ impl FromStr for NamedChannelOrUrl {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if parse_scheme(s).is_some() {
-            Ok(NamedChannelOrUrl::Url(Url::from_str(s)?))
+            Ok(NamedChannelOrUrl::Url(parse_url_with_pfx(s)?))
         } else if is_path(s) {
             Ok(NamedChannelOrUrl::Path(s.into()))
         } else {
@@ -212,7 +243,7 @@ impl Channel {
         let (platforms, channel) = parse_platforms(str)?;
 
         let channel = if parse_scheme(channel).is_some() {
-            let url = Url::parse(channel)?;
+            let url = parse_url_with_pfx(channel)?;
             let name = config.strip_channel_alias(&url);
             let base_channel = Channel::from_url(url);
 
@@ -261,7 +292,7 @@ impl Channel {
     /// Constructs a new [`Channel`] from a `Url` and associated platforms.
     pub fn from_url(url: impl Into<ChannelUrl>) -> Self {
         // Get the path part of the URL but trim the directory suffix
-        let url: ChannelUrl = url.into();
+        let url: ChannelUrl = expand_pfx_url(url.into().into()).into();
 
         let path = url.url().path().trim_end_matches('/');
 
@@ -642,6 +673,35 @@ mod tests {
             &config,
         );
         assert_eq!(channel.unwrap().name(), "conda-forge/label/rust_dev",);
+    }
+
+    #[test]
+    fn pfx_urls_expand_to_prefix_dev() {
+        let config = ChannelConfig::default_with_root_dir(std::env::current_dir().unwrap());
+        let expected = "https://prefix.dev/conda-forge/label/dev/";
+
+        let channel = Channel::from_str("pfx://conda-forge/label/dev", &config).unwrap();
+        assert_eq!(channel.base_url.as_str(), expected);
+        assert_eq!(channel.name.as_deref(), Some("conda-forge/label/dev"));
+        assert_eq!(
+            channel.platform_url(Platform::NoArch).as_str(),
+            "https://prefix.dev/conda-forge/label/dev/noarch/"
+        );
+
+        let named = NamedChannelOrUrl::from_str("PFX://conda-forge/label/dev").unwrap();
+        assert_eq!(named.into_base_url(&config).unwrap().as_str(), expected);
+
+        let from_url = Channel::from_url(Url::parse("pfx://conda-forge/label/dev").unwrap());
+        assert_eq!(from_url.base_url.as_str(), expected);
+
+        // Once parsed, the shorthand is gone. Downstream serialization (including
+        // lockfiles) therefore records the canonical download URL.
+        assert!(!serde_json::to_string(&channel).unwrap().contains("pfx://"));
+        assert!(
+            serde_json::to_string(&channel)
+                .unwrap()
+                .contains("https://prefix.dev/conda-forge/label/dev")
+        );
     }
 
     #[test]

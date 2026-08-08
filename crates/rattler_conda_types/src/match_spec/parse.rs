@@ -25,6 +25,7 @@ use crate::{
     Channel, ChannelConfig, NamelessMatchSpec, ParseChannelError, ParseMatchSpecOptions,
     ParseStrictness, ParseVersionError, Platform, VersionSpec,
     build_spec::{BuildNumberSpec, ParseBuildNumberSpecError},
+    channel::parse_url_with_pfx,
     flags::is_valid_matchspec_flag,
     match_spec::package_name_matcher::{PackageNameMatcher, PackageNameMatcherParseError},
     package::CondaArchiveIdentifier,
@@ -574,7 +575,7 @@ fn parse_bracket_vec_into_components(
             "url" => {
                 // Is the spec an url, parse it as an url
                 let url = if parse_scheme(value).is_some() {
-                    Url::parse(value)?
+                    parse_url_with_pfx(value)?
                 }
                 // 2 Is the spec an absolute path, parse it as an url
                 else if is_absolute_path(value) {
@@ -644,7 +645,7 @@ pub fn parse_url_like(input: &str) -> Result<Option<Url>, ParseMatchSpecError> {
 
     // Is the spec an url, parse it as an url
     if parse_scheme(input).is_some() {
-        return Url::parse(input)
+        return parse_url_with_pfx(input)
             .map(Some)
             .map_err(ParseMatchSpecError::from);
     }
@@ -1673,6 +1674,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(spec.url, Some(Url::parse("https://conda.anaconda.org/conda-forge/linux-64/py-rattler-0.6.1-py39h8169da8_0.conda").unwrap()));
+    }
+
+    #[test]
+    fn test_parsing_pfx_package_url() {
+        let expected = Url::parse(
+            "https://prefix.dev/conda-forge/linux-64/py-rattler-0.6.1-py39h8169da8_0.conda",
+        )
+        .unwrap();
+
+        let spec = MatchSpec::from_str(
+            "pfx://conda-forge/linux-64/py-rattler-0.6.1-py39h8169da8_0.conda",
+            Strict,
+        )
+        .unwrap();
+        assert_eq!(spec.url, Some(expected.clone()));
+
+        let spec = MatchSpec::from_str(
+            "py-rattler[url=pfx://conda-forge/linux-64/py-rattler-0.6.1-py39h8169da8_0.conda]",
+            Strict,
+        )
+        .unwrap();
+        assert_eq!(spec.url, Some(expected));
     }
 
     #[test]

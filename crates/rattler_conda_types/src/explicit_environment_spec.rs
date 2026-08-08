@@ -9,7 +9,7 @@
 //!
 //! To create an explicit environment file, you can use the `conda env export` command.
 
-use crate::{ParsePlatformError, Platform};
+use crate::{ParsePlatformError, Platform, channel::parse_url_with_pfx};
 use fs_err::{self as fs, File};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path, str::FromStr};
@@ -202,7 +202,7 @@ impl FromStr for ExplicitEnvironmentSpec {
             } else {
                 // Parse the line as an explicit URL
                 packages.push(
-                    Url::parse(line.trim())
+                    parse_url_with_pfx(line.trim())
                         .map_err(|e| {
                             ParseExplicitEnvironmentSpecError::InvalidUrl(line.trim().to_owned(), e)
                         })?
@@ -258,6 +258,19 @@ mod test {
             ),
             Err(ParseExplicitEnvironmentSpecError::MissingExplicitTag)
         );
+    }
+
+    #[test]
+    fn test_parse_pfx_url_is_resolved() {
+        let env = ExplicitEnvironmentSpec::from_str(
+            "@EXPLICIT\npfx://conda-forge/linux-64/example-1.0-0.conda",
+        )
+        .unwrap();
+        assert_eq!(
+            env.packages[0].url.as_str(),
+            "https://prefix.dev/conda-forge/linux-64/example-1.0-0.conda"
+        );
+        assert!(!env.to_spec_string().contains("pfx://"));
     }
 
     #[test]
