@@ -71,10 +71,21 @@ fn rejected(lock: &LockFile, location: &str) {
     let error = lock.validate_urls_for_export().unwrap_err();
     assert_eq!(error.location, location);
     assert!(!format!("{error:?}: {error}").contains("EXAMPLE_SECRET"));
+    let yaml_error = serde_yaml::to_string(lock).unwrap_err();
+    let json_error = serde_json::to_string(lock).unwrap_err();
+    let render_error = lock.render_to_string().unwrap_err();
+    for message in [
+        yaml_error.to_string(),
+        json_error.to_string(),
+        render_error.to_string(),
+    ] {
+        assert!(message.contains(location));
+        assert!(!message.contains("EXAMPLE_SECRET"));
+    }
 }
 
 #[test]
-fn channel_validation_is_opt_in_and_does_not_change_serialization() {
+fn serialization_rejects_unsafe_urls_unless_explicitly_opted_out() {
     for value in [
         "https://EXAMPLE_SECRET@example.com/channel",
         "https://user:EXAMPLE_SECRET@example.com/channel",
@@ -82,18 +93,65 @@ fn channel_validation_is_opt_in_and_does_not_change_serialization() {
         "https://example.com/%74/EXAMPLE_SECRET/channel",
         "https://example.com/%252574/EXAMPLE_SECRET/channel",
         UNSAFE,
+        "https://example.com/channel?platform=linux-64",
+        "https://example.com/channel?",
         "https://example.com/channel#EXAMPLE_SECRET",
         "file:///channel?opaque=EXAMPLE_SECRET",
+        "s://example.com/channel?opaque=EXAMPLE_SECRET",
         "https://[EXAMPLE_SECRET",
     ] {
         let mut builder = LockFile::builder();
         builder.set_channels("EXAMPLE_SECRET", [value]);
         let lock = builder.finish();
-        let before = lock.render_to_string().unwrap();
-        assert!(before.contains("EXAMPLE_SECRET"));
+        let before = serde_yaml::to_string(&lock.allow_unsafe_urls()).unwrap();
+        assert!(before.contains(value));
         rejected(&lock, "environments[0].channels[0].url");
-        assert_eq!(before, lock.render_to_string().unwrap());
+        // Opting out is confined to this view; the lock and its clones still
+        // reject unsafe URLs, and parsing remains available for migration.
+        rejected(&lock.clone(), "environments[0].channels[0].url");
+        let legacy = LockFile::from_str_with_base_directory(&before, None).unwrap();
+        rejected(&legacy, "environments[0].channels[0].url");
+        assert_eq!(
+            before,
+            serde_yaml::to_string(&legacy.allow_unsafe_urls()).unwrap()
+        );
     }
+}
+
+#[test]
+fn rejection_happens_before_writing_bytes_or_opening_the_destination() {
+    let mut builder = LockFile::builder();
+    builder.set_channels("default", [UNSAFE]);
+    let lock = builder.finish();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lock.yml");
+
+    let error = lock.to_path(&path).unwrap_err();
+    assert!(!error.to_string().contains("EXAMPLE_SECRET"));
+    assert!(!path.exists(), "validation must run before file creation");
+    std::fs::write(&path, "existing lockfile\n").unwrap();
+    assert!(lock.to_path(&path).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "existing lockfile\n"
+    );
+
+    let mut yaml = Vec::new();
+    assert!(serde_yaml::to_writer(&mut yaml, &lock).is_err());
+    assert!(yaml.is_empty());
+    let mut json = Vec::new();
+    assert!(serde_json::to_writer(&mut json, &lock).is_err());
+    assert!(json.is_empty());
+
+    // A valid lockfile still uses the normal file-writing path.
+    let mut builder = LockFile::builder();
+    builder.set_channels("default", [SAFE]);
+    let safe = builder.finish();
+    safe.to_path(&path).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        safe.render_to_string().unwrap()
+    );
 }
 
 #[test]
@@ -106,6 +164,8 @@ fn public_urls_digest_fragments_and_local_paths_pass() {
         "./channel",
         "/opt/channel",
         "C:\\channel",
+        "C:/channel",
+        "C:channel",
         "file:///opt/channel",
     ] {
         let mut builder = LockFile::builder();
@@ -129,6 +189,12 @@ fn public_urls_digest_fragments_and_local_paths_pass() {
 
 #[test]
 fn conda_package_locations_and_channels_are_checked() {
+    let mut package = conda();
+    package.location = UrlOrPath::Path(UNSAFE.into());
+    rejected(
+        &with_package(LockedPackage::Conda(package.into())),
+        "packages[0].location",
+    );
     let mut package = conda();
     package.location = url(UNSAFE).into();
     rejected(

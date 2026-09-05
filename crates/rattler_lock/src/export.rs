@@ -1,4 +1,4 @@
-//! Opt-in checks for URLs in reusable lockfiles.
+//! Default URL policy for reusable lockfiles.
 
 use pep508_rs::VersionOrUrl;
 use rattler_redaction::strip_url_for_serialization;
@@ -22,7 +22,7 @@ pub struct UrlExportError {
 }
 
 impl LockFile {
-    /// Check URL fields before publishing or committing this lockfile.
+    /// Check URL fields using the default serialization policy.
     ///
     /// Rejects URLs that [`rattler_redaction::strip_url_for_serialization`] would
     /// change: userinfo, Conda token prefixes, query strings, and non-digest
@@ -37,9 +37,11 @@ impl LockFile {
     /// checked.
     ///
     /// The first failing field is returned without including the original URL.
-    /// This method does not modify the lockfile. Ordinary serialization,
-    /// [`Self::render_to_string`], and [`Self::to_path`] remain lossless and do not
-    /// invoke this check automatically.
+    /// This method does not modify the lockfile. Ordinary Serde serialization,
+    /// [`Self::render_to_string`], and [`Self::to_path`] invoke this check
+    /// automatically. Parsing remains permissive so legacy lockfiles can be
+    /// inspected and migrated. [`Self::allow_unsafe_urls`] provides an explicit
+    /// serialization-only opt-out.
     ///
     /// ```
     /// # use rattler_lock::LockFile;
@@ -133,17 +135,23 @@ fn check_url(url: &Url, location: &str) -> Result<(), UrlExportError> {
 }
 
 fn check_location(value: &UrlOrPath, location: &str) -> Result<(), UrlExportError> {
-    if let UrlOrPath::Url(url) = value {
-        check_url(url, location)?;
+    // UrlOrPath is serialized as a string, including when callers construct
+    // its Path variant directly with URL-shaped contents.
+    match value {
+        UrlOrPath::Url(url) => check_url(url, location),
+        UrlOrPath::Path(path) => check_text(path.as_str(), location),
     }
-    Ok(())
 }
 
 fn check_text(value: &str, location: &str) -> Result<(), UrlExportError> {
     // Keep file URLs intact while checking: normalizing them to paths first can
     // discard URL components. Windows drive paths are not URL userinfo/schemes.
     match Url::parse(value) {
-        Ok(url) if url.scheme().len() == 1 && url.scheme().as_bytes()[0].is_ascii_alphabetic() => {
+        Ok(url)
+            if url.scheme().len() == 1
+                && url.scheme().as_bytes()[0].is_ascii_alphabetic()
+                && !url.as_str()[2..].starts_with("//") =>
+        {
             Ok(())
         }
         Ok(url) => check_url(&url, location),

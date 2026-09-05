@@ -40,3 +40,4 @@ insta = { workspace = true, features = ["yaml"] }
 serde_json = { workspace = true }
 similar-asserts = { workspace = true }
 rstest = { workspace = true }
+tempfile = { workspace = true }
