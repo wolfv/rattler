@@ -146,19 +146,15 @@ fn push_identifiers(
     identifiers: &str,
     first_separator: Option<char>,
 ) {
-    let start = segments.len();
+    // Conda versions cannot contain `-`, so `alpha-1` becomes two `.` separated
+    // segments. Empty parts like in `--` have no conda equivalent, skip those.
     let mut separator = first_separator;
-    for identifier in identifiers.split('.') {
-        // Conda splits on `-` too, so `alpha-1` becomes two segments, the same
-        // as what the parser does. Empty parts like in `--` have no conda
-        // equivalent, skip those.
-        for part in identifier.split('-').filter(|part| !part.is_empty()) {
-            push_identifier(components, segments, part, separator);
-            separator = Some('-');
-        }
-        if segments.len() > start {
-            separator = Some('.');
-        }
+    for part in identifiers
+        .split(['.', '-'])
+        .filter(|part| !part.is_empty())
+    {
+        push_identifier(components, segments, part, separator);
+        separator = Some('.');
     }
 }
 
@@ -380,10 +376,10 @@ mod test {
     #[case("1.2.3-x.7.z.92", "1.2.3.x.7.z.92")]
     #[case("1.2.3-RC.1", "1.2.3.rc.1")]
     #[case("1.2.3-dev.1", "1.2.3.dev.1")]
-    #[case("1.2.3-alpha-1", "1.2.3.alpha-1")]
+    #[case("1.2.3-alpha-1", "1.2.3.alpha.1")]
     #[case("1.2.3+build.5", "1.2.3+build.5")]
     #[case("1.2.3-rc.1+build.5", "1.2.3.rc.1+build.5")]
-    #[case("1.2.3+21AF26D3----117B344092BD", "1.2.3+21af26d3-117b344092bd")]
+    #[case("1.2.3+21AF26D3----117B344092BD", "1.2.3+21af26d3.117b344092bd")]
     // Numbers that do not fit in a `u64` are kept as text.
     #[case("1.2.3-99999999999999999999", "1.2.3.99999999999999999999")]
     fn test_from_semver(#[case] input: &str, #[case] expected: &str) {
@@ -412,7 +408,6 @@ mod test {
     #[case("1.2.3.dev1", "1.2.3-dev.1")]
     #[case("1.2.3+build.5", "1.2.3+build.5")]
     #[case("1.2.3.rc1+build.5", "1.2.3-rc.1+build.5")]
-    #[case("1.0.1-", "1.0.1--")]
     fn test_to_semver(#[case] input: &str, #[case] expected: &str) {
         let version = Version::from_str(input).unwrap();
         let semver = SemverVersion::try_from(&version).unwrap();

@@ -1,6 +1,5 @@
 ---
 source: crates/rattler_conda_version/src/version/parse.rs
-assertion_line: 517
 expression: index_map
 ---
 {
@@ -10,7 +9,10 @@ expression: index_map
     ".": Error(
         "expected a version component e.g. `2` or `rc`",
     ),
-    "1!1.2a.3-rc1": Version(
+    "1!1.2a.3-rc1": Error(
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
+    ),
+    "1!1.2a.3_rc1": Version(
         Version {
             version: [[1], [1], [2, 'a'], [3], [0, 'rc', 1]],
             local: [],
@@ -31,32 +33,23 @@ expression: index_map
             local: [[2]],
         },
     ),
-    "1--": Version(
-        Version {
-            version: [[0], [1], [0, '_']],
-            local: [],
-        },
+    "1--": Error(
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
-    "1-2-3": Version(
-        Version {
-            version: [[0], [1], [2], [3]],
-            local: [],
-        },
+    "1-2-3": Error(
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
     "1-2-3_": Error(
-        "cannot use both underscores and dashes as version segment separators",
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
     "1-2_3": Error(
-        "cannot use both underscores and dashes as version segment separators",
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
     "1-_": Error(
-        "cannot use both underscores and dashes as version segment separators",
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
-    "1.0.1-": Version(
-        Version {
-            version: [[0], [1], [0], [1, '_']],
-            local: [],
-        },
+    "1.0.1-": Error(
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
     "1.0.1_": Version(
         Version {
@@ -80,7 +73,7 @@ expression: index_map
         },
     ),
     "1_-": Error(
-        "cannot use both underscores and dashes as version segment separators",
+        "'-' is not allowed in versions because package filenames use it to separate the name, version, and build string; use '_' or '.' instead",
     ),
     "1_2_3": Version(
         Version {

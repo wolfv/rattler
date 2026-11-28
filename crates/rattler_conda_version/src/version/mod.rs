@@ -290,7 +290,7 @@ impl Version {
     /// ```
     /// # use rattler_conda_version::Version;
     /// # use std::str::FromStr;
-    /// let version = Version::from_str("1.3a.4-alpha3+build").unwrap();
+    /// let version = Version::from_str("1.3a.4_alpha3+build").unwrap();
     /// let selected = version.with_segments(1..3).unwrap();
     ///
     /// assert_eq!(selected.to_string(), "3a.4+build");
@@ -1685,14 +1685,14 @@ mod test {
         assert_eq!(Version::from_str("1.2.3").unwrap().to_string(), "1.2.3");
         assert_eq!(Version::from_str("1!1.2.3").unwrap().to_string(), "1!1.2.3");
         assert_eq!(
-            Version::from_str("1.2.3-alpha.2").unwrap().to_string(),
-            "1.2.3-alpha.2"
+            Version::from_str("1.2.3_alpha.2").unwrap().to_string(),
+            "1.2.3_alpha.2"
         );
         assert_eq!(
-            Version::from_str("1!1.2.3-alpha.2+3beta5rc")
+            Version::from_str("1!1.2.3_alpha.2+3beta5rc")
                 .unwrap()
                 .to_string(),
-            "1!1.2.3-alpha.2+3beta5rc"
+            "1!1.2.3_alpha.2+3beta5rc"
         );
     }
 

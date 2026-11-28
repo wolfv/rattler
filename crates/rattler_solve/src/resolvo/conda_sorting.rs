@@ -597,13 +597,4 @@ mod tests {
         let versions = versions.iter().collect_vec();
         assert_eq!(rank_versions(&versions), [1, 2, 0, 1]);
     }
-
-    #[test]
-    fn rank_versions_ranks_by_cmp_not_eq() {
-        let underscore: Version = "1.0_".parse().unwrap();
-        let dash: Version = "1.0-".parse().unwrap();
-        assert_ne!(underscore, dash);
-        assert_eq!(underscore.cmp(&dash), Ordering::Equal);
-        assert_eq!(rank_versions(&[&underscore, &dash]), [0, 0]);
-    }
 }

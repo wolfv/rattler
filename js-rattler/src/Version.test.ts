@@ -19,7 +19,6 @@ describe("Version", () => {
         });
         it("should retain separators", () => {
             expect(new Version("1.2.3").toString()).toBe("1.2.3");
-            expect(new Version("1-2-3").toString()).toBe("1-2-3");
             expect(new Version("1_2_3").toString()).toBe("1_2_3");
         });
     });
@@ -122,7 +121,7 @@ describe("Version", () => {
                 new Version("1.2.3").equals(new Version("1.2.3")),
             ).toBeTruthy();
             expect(new Version("1").equals(new Version("1.0"))).toBeTruthy();
-            expect(new Version("1").equals(new Version("1-0"))).toBeTruthy();
+            expect(new Version("1").equals(new Version("1_0"))).toBeTruthy();
         });
         it("should return false if the versions are not equal", () => {
             expect(
@@ -149,8 +148,8 @@ describe("Version", () => {
                 "1.2.0.0.0",
             );
             expect(new Version("1").extendToLength(3).toString()).toBe("1.0.0");
-            expect(new Version("1-beta").extendToLength(3).toString()).toBe(
-                "1-beta.0",
+            expect(new Version("1_beta").extendToLength(3).toString()).toBe(
+                "1_beta.0",
             );
         });
         it("should return the original version if the version is already at the specified length", () => {

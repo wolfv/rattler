@@ -212,7 +212,7 @@ class Version:
         Examples
         --------
         ```python
-        >>> v = Version('1.0+3.2-alpha0')
+        >>> v = Version('1.0+3.2_alpha0')
         >>> v.has_local
         True
         >>> v2 = Version('1.0')
@@ -231,7 +231,7 @@ class Version:
         Examples
         --------
         ```python
-        >>> v = Version("1.2dev.3-alpha4.5+6.8")
+        >>> v = Version("1.2dev.3_alpha4.5+6.8")
         >>> v.segments()
         [[1], [2, 'dev'], [3], [0, 'alpha', 4], [5]]
         >>>
@@ -247,7 +247,7 @@ class Version:
         Examples
         --------
         ```python
-        >>> v = Version("1.2dev.3-alpha4.5+6.8")
+        >>> v = Version("1.2dev.3_alpha4.5+6.8")
         >>> v.local_segments()
         [[6], [8]]
         >>>
@@ -406,7 +406,7 @@ class Version:
         Examples
         --------
         ```python
-        >>> v = Version('1.2.3+4.alpha-5')
+        >>> v = Version('1.2.3+4.alpha_5')
         >>> v.strip_local()
         Version("1.2.3")
         >>>

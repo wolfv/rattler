@@ -203,6 +203,18 @@ fn logical_constraint_parser(
             };
         }
 
+        // Versions cannot contain `-`, but existing specs (e.g. dependencies in repodata) use it
+        // as a segment separator. Like conda, lenient parsing reads those dashes as underscores
+        // as long as the version does not use underscores as well.
+        let normalized_version;
+        let version_str =
+            if strictness == Lenient && version_str.contains('-') && !version_str.contains('_') {
+                normalized_version = version_str.replace('-', "_");
+                normalized_version.as_str()
+            } else {
+                version_str
+            };
+
         // Parse the string as a version
         let (version_rest, version) = version_parser(version_str).map_err(|e| {
             e.map(|e| {

@@ -364,7 +364,7 @@ mod tests {
 
     use crate::{
         ParseStrictness, Version, VersionSpec,
-        version::StrictVersion,
+        version::{ParseVersionError, ParseVersionErrorKind, StrictVersion},
         version_spec::{
             EqualityOperator, LogicalOperator, ParseVersionSpecError, RangeOperator,
             StrictRangeOperator, parse::ParseConstraintError,
@@ -589,6 +589,45 @@ mod tests {
         );
 
         assert!(VersionSpec::from_str("0.2.18.*.*", ParseStrictness::Strict).is_err());
+    }
+
+    /// Dependencies in existing repodata use `-` in versions, e.g.
+    /// `r-matrix >=1.2-10`. Lenient parsing reads those as `_`, strict parsing
+    /// rejects them.
+    #[test]
+    fn dash_in_version_spec() {
+        let lenient = |s| VersionSpec::from_str(s, ParseStrictness::Lenient);
+        assert_eq!(
+            lenient(">=1.2-10,<2.14.0-dev0").unwrap(),
+            lenient(">=1.2_10,<2.14.0_dev0").unwrap()
+        );
+        assert!(
+            lenient("<2.14.0-dev0")
+                .unwrap()
+                .matches(&Version::from_str("2.14.0rc1").unwrap())
+        );
+        assert!(
+            !lenient(">=1.2-10")
+                .unwrap()
+                .matches(&Version::from_str("1.2.9").unwrap())
+        );
+
+        let is_dash_error = |error| {
+            matches!(
+                error,
+                ParseVersionSpecError::InvalidConstraint(ParseConstraintError::InvalidVersion(
+                    ParseVersionError {
+                        kind: ParseVersionErrorKind::DashNotAllowed,
+                        ..
+                    }
+                ))
+            )
+        };
+        // Mixing `-` and `_` is ambiguous, conda rejects that as well.
+        assert!(is_dash_error(lenient(">=1.2-10_1").unwrap_err()));
+        assert!(is_dash_error(
+            VersionSpec::from_str(">=1.2-10", ParseStrictness::Strict).unwrap_err()
+        ));
     }
 
     #[test]

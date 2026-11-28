@@ -1,23 +1,19 @@
 import pytest
 
 from rattler import Version, VersionSpec, VersionWithSource
+from rattler.exceptions import InvalidVersionError
 
 
-def test_version_dash_normalisation() -> None:
-    assert Version("1.0-").segments() == [[1], [0, "_"]]
+def test_version_trailing_underscore() -> None:
     assert Version("1.0_").segments() == [[1], [0, "_"]]
-    assert Version("1.0dev-+2.3").segments() == [[1], [0, "dev", "_"]]
     assert Version("1.0dev_").segments() == [[1], [0, "dev", "_"]]
+    assert Version("1.0dev_+3.4_").local_segments() == [[3], [4, "_"]]
 
-    assert Version("1.0dev-+2.3").local_segments() == [[2], [3]]
-    assert Version("1.0dev+3.4-dev").local_segments() == [[3], [4], [0, "dev"]]
-    assert Version("1.0dev+3.4-").local_segments() == [[3], [4, "_"]]
 
-    with pytest.raises(Exception):
-        Version("1-.0dev-")
-
-    with pytest.raises(Exception):
-        Version("1-.0dev+3.4-")
+@pytest.mark.parametrize("version", ["1.0-", "1.0-rc1", "1-2-3", "1.0+3.4-dev"])
+def test_version_dash_not_allowed(version: str) -> None:
+    with pytest.raises(InvalidVersionError, match="'-' is not allowed in versions"):
+        Version(version)
 
 
 def test_compare_with_source() -> None:

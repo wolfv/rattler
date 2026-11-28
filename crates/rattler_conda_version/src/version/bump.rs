@@ -328,7 +328,7 @@ mod test {
     #[case("5!1.alpha+3.4", "5!2.alpha+3.4")]
     #[case("1.2.3", "2.0.0")]
     #[case("0.1.0", "1.0.0")]
-    #[case("1.2.3-alpha", "2.0.0-alpha")]
+    #[case("1.2.3_alpha", "2.0.0_alpha")]
     #[case("9d", "10a")]
     fn bump_major(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(
